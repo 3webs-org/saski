@@ -65,6 +65,15 @@ ARCH="${ARCH:-x86_64}"
 # exactly what they were.
 EMBEDDED="${EMBEDDED:-0}"
 
+# The aarch64 boot path is arch/boot_aarch64.S and is NOT in the x86_64 link.
+# It captures the DTB address from x0, validates the blob's magic before
+# trusting its declared size, and calls kernel_boot_aarch64, which does not
+# exist yet -- so this target assembles but does not link. Saying that here
+# rather than in a commit message nobody will read: ARCH=aarch64 is a
+# work-in-progress path, and selecting it will fail at link with an undefined
+# kernel_boot_aarch64. The x86_64 default is unaffected and remains the only
+# path that boots.
+
 CC="${CC:-clang-18}"
 LD64="${LD64:-ld64.lld}"
 TARGET=x86_64-apple-darwin
