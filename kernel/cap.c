@@ -25,7 +25,12 @@ typedef struct {
     int valid;
     object_handler_fn handler;
     void *data;
-    const object_schema_t *schema;
+    /* A resolved schema is a (table, index) PAIR, never a bare pointer.
+     * With compile-time-const tables an object_schema_t holds an index
+     * into its table, so the table must travel with it or the index is
+     * meaningless. */
+    const schema_table_t *schema_table;
+    schema_idx_t schema_index;
 } cap_record_t;
 
 _Static_assert(sizeof(cap_record_t) <= CAP_RECORD_SIZE,
@@ -86,46 +91,68 @@ static void cap_unlock(void)
 #define FACTORY_METHOD_CREATE 0
 #define FACTORY_METHOD_DESTROY 1
 
-static const struct_schema_t g_create_request_schema = {
-    .data_words = 4, .pointer_count = 0, .pointers = NULL};
-static const struct_schema_t g_create_response_schema = {
-    .data_words = 1, .pointer_count = 0, .pointers = NULL};
-static const struct_schema_t g_destroy_request_schema = {
-    .data_words = 1, .pointer_count = 0, .pointers = NULL};
-
-/* These three leaf schemas have no pointer fields of their own, so they
- * stay ordinary compile-time const data -- genuinely position-independent
- * already, nothing to fix up regardless of load address.
+/* The factory's schema, as fully compile-time-constant data.
  *
- * g_factory_methods/g_factory_schema are different: initializing
- * them with &g_create_request_schema (or an array-decay pointer, for
- * .methods) at compile time would bake in an ABSOLUTE address computed
- * for a load base of exactly 1M (this kernel's current fixed link
- * address) -- correct only by coincidence of always loading there. The
- * moment a second kernel instance (a second core, in a multikernel
- * design) needs to load at a different physical address, that baked
- * address would be silently wrong, and Mach-O/ELF relocation-table
- * processing to fix it up doesn't exist in either of this project's own
- * from-scratch loaders. Populating these at runtime instead sidesteps
- * the whole problem: the assignment below is an ordinary RIP-relative
- * store, correct no matter where this kernel image actually ended up
- * running from -- no relocation table, no loader changes, anywhere. */
-static method_schema_t g_factory_methods[2];
-static object_schema_t g_factory_schema;
+ * This used to be built at runtime by init_factory_schema(), because a static
+ * initialiser holding another object's address bakes in an absolute value
+ * valid only for one load address, and a second kernel instance on another
+ * core loads elsewhere. The conclusion drawn then -- that runtime construction
+ * was the only way out -- was wrong. The actual requirement is that the
+ * initialiser contain nothing needing relocation, and INDICES satisfy that
+ * where pointers do not.
+ *
+ * So every reference below is an index into g_factory_table. Integers are
+ * arithmetic, not addresses; the whole tree is const, sits in read-only data,
+ * is identical for every kernel instance, costs no per-instance RAM and needs
+ * nothing constructed before first use. On a target with 32 KiB of RAM that is
+ * the point: a schema costs flash, not RAM.
+ *
+ * Layout is load-bearing: struct indices are positional in g_factory_structs,
+ * and each method names its param and result schema by index. */
+static const struct_schema_t g_factory_structs[] = {
+    /* 0: CREATE request -- CAP_CREATE_REQUEST_WORDS data words, no pointer
+     * fields. The word count lives in cap.h so the consumer repo reads the
+     * same constant rather than duplicating a literal. */
+    {.data_words = CAP_CREATE_REQUEST_WORDS, .pointer_count = 0,
+     .first_pointer = SCHEMA_IDX_NONE},
+    /* 1: CREATE response -- one data word (the handle). */
+    {.data_words = 1, .pointer_count = 0, .first_pointer = SCHEMA_IDX_NONE},
+    /* 2: DESTROY request -- one data word (the target handle). */
+    {.data_words = 1, .pointer_count = 0, .first_pointer = SCHEMA_IDX_NONE},
+};
 
-static void init_factory_schema(void)
-{
-    g_factory_methods[0].method_id = FACTORY_METHOD_CREATE;
-    g_factory_methods[0].param_schema = &g_create_request_schema;
-    g_factory_methods[0].result_schema = &g_create_response_schema;
+/* No struct here declares a pointer slot, so the array is empty. It exists so
+ * the table's shape is uniform and adding a pointer-bearing method later is a
+ * table edit only. */
+static const pointer_schema_t g_factory_pointers[] = {{PTR_SCHEMA_ANY, 0, 0}};
 
-    g_factory_methods[1].method_id = FACTORY_METHOD_DESTROY;
-    g_factory_methods[1].param_schema = &g_destroy_request_schema;
-    g_factory_methods[1].result_schema = NULL;
+static const method_schema_t g_factory_methods[] = {
+    {.method_id = FACTORY_METHOD_CREATE,
+     .param_schema = 0,
+     .result_schema = 1},
+    {.method_id = FACTORY_METHOD_DESTROY,
+     .param_schema = 2,
+     .result_schema = SCHEMA_IDX_NONE},
+};
 
-    g_factory_schema.methods = g_factory_methods;
-    g_factory_schema.method_count = 2;
-}
+static const object_schema_t g_factory_objects[] = {
+    {.first_method = 0, .method_count = 2},
+};
+
+static const schema_table_t g_factory_table = {
+    .structs = g_factory_structs,
+    .struct_count = 3,
+    .pointers = g_factory_pointers,
+    .pointer_count = 0,
+    .methods = g_factory_methods,
+    .method_count = 2,
+    .objects = g_factory_objects,
+    .object_count = 1,
+};
+
+/* The factory object's schema handle: index 0 in the table above, a plain
+ * integer so it too is compile-time constant. */
+#define FACTORY_SCHEMA_IDX ((schema_idx_t)0)
 
 static void factory_handler(void *data, uint32_t method_id,
                                 const void *msg, size_t len, void *response,
@@ -146,9 +173,10 @@ static void factory_handler(void *data, uint32_t method_id,
         const uint64_t *words = (const uint64_t *)((const uint8_t *)msg + 16);
         object_handler_fn handler = (object_handler_fn)(uintptr_t)words[0];
         void *handler_data = (void *)(uintptr_t)words[1];
-        const object_schema_t *schema =
-            (const object_schema_t *)(uintptr_t)words[2];
-        void *record_storage = (void *)(uintptr_t)words[3];
+        const schema_table_t *schema_table =
+            (const schema_table_t *)(uintptr_t)words[2];
+        schema_idx_t schema_index = (schema_idx_t)words[3];
+        void *record_storage = (void *)(uintptr_t)words[4];
 
         if (!record_storage) {
             kprintf("[kernel] factory: create failed, no record storage "
@@ -162,7 +190,8 @@ static void factory_handler(void *data, uint32_t method_id,
         r->valid = 1;
         r->handler = handler;
         r->data = handler_data;
-        r->schema = schema;
+        r->schema_table = schema_table;
+        r->schema_index = schema_index;
         cap_unlock();
 
         uint64_t handle = (uint64_t)(uintptr_t)record_storage;
@@ -218,7 +247,8 @@ static void factory_handler(void *data, uint32_t method_id,
         r->magic = 0;
         r->handler = NULL;
         r->data = NULL;
-        r->schema = NULL;
+        r->schema_table = NULL;
+        r->schema_index = SCHEMA_IDX_NONE;
         cap_unlock();
         return;
     }
@@ -228,13 +258,12 @@ static void factory_handler(void *data, uint32_t method_id,
 
 initial_capabilities_t kernel_cap_bootstrap(void)
 {
-    init_factory_schema();
-
     g_factory_record.magic = CAP_RECORD_MAGIC;
     g_factory_record.valid = 1;
     g_factory_record.handler = factory_handler;
     g_factory_record.data = NULL;
-    g_factory_record.schema = &g_factory_schema;
+    g_factory_record.schema_table = &g_factory_table;
+    g_factory_record.schema_index = FACTORY_SCHEMA_IDX;
 
     initial_capabilities_t caps;
     caps.count = 1; /* the factory object itself */
@@ -242,12 +271,25 @@ initial_capabilities_t kernel_cap_bootstrap(void)
     return caps;
 }
 
-static const method_schema_t *find_method(const object_schema_t *schema,
+static const method_schema_t *find_method(const schema_table_t *table,
+                                          schema_idx_t object_schema,
                                           uint32_t method_id)
 {
-    for (size_t i = 0; i < schema->method_count; i++) {
-        if (schema->methods[i].method_id == method_id) {
-            return &schema->methods[i];
+    const object_schema_t *obj = schema_object(table, object_schema);
+    if (!obj) {
+        return NULL;
+    }
+    /* The method run is contiguous from first_method, and every step is
+     * bounds-checked: a caller-supplied table can have a run that overruns
+     * its own array, and that must be a rejection rather than a read past the
+     * end of the table. */
+    for (uint16_t i = 0; i < obj->method_count; i++) {
+        uint32_t idx = (uint32_t)obj->first_method + i;
+        if (idx >= (uint32_t)table->method_count) {
+            return NULL;
+        }
+        if (table->methods[idx].method_id == method_id) {
+            return &table->methods[idx];
         }
     }
     return NULL;
@@ -292,14 +334,16 @@ int kernel_invoke(capability_t target, uint32_t method_id, const void *msg,
     cap_record_t record = *target_record;
     cap_unlock();
 
-    const method_schema_t *method = find_method(record.schema, method_id);
+    const method_schema_t *method = find_method(record.schema_table,
+                                                record.schema_index, method_id);
     if (!method) {
         kprintf("[kernel] kernel_invoke: handle 0x%X has no method %u\n",
                 (unsigned)target.handle, (unsigned)method_id);
         return 0;
     }
 
-    if (!capnp_validate_message(msg, len, method->param_schema)) {
+    if (!capnp_validate_message(msg, len, record.schema_table,
+                                method->param_schema)) {
         kprintf("[kernel] kernel_invoke: request to handle %u method %u "
                 "failed structural validation, REJECTED before dispatch\n",
                 (unsigned)target.handle, (unsigned)method_id);
@@ -309,8 +353,9 @@ int kernel_invoke(capability_t target, uint32_t method_id, const void *msg,
     record.handler(record.data, method_id, msg, len, response, response_cap,
                     out_response_len);
 
-    if (method->result_schema &&
+    if (method->result_schema != SCHEMA_IDX_NONE &&
         !capnp_validate_message(response, *out_response_len,
+                                record.schema_table,
                                 method->result_schema)) {
         kprintf("[kernel] kernel_invoke: response from handle %u method %u "
                 "failed structural validation -- object claimed a shape it "

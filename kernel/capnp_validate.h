@@ -33,5 +33,11 @@
  *     past the depth limit is also rejected, which is the correct
  *     trade for a kernel-level check that must never run unboundedly.
  */
+/* `table` is the compiled-in schema tree the index in `schema` resolves
+ * against; `schema` may be SCHEMA_IDX_NONE, meaning no validation was
+ * requested (an object opt-out -- see schema.h). Indices are bounds-checked
+ * against the table, so a caller-supplied table cannot be used to read past
+ * its own end. */
 int capnp_validate_message(const void *msg, size_t len,
-                           const struct_schema_t *schema);
+                           const schema_table_t *table,
+                           schema_idx_t schema);

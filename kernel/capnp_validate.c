@@ -33,11 +33,15 @@ static uint64_t read_word(const capnp_msg_t *m, int64_t word_offset)
     return w;
 }
 
-static int validate_struct_at(const capnp_msg_t *m, int64_t struct_word_offset,
+static int validate_struct_at(const capnp_msg_t *m,
+                              const schema_table_t *table,
+                              int64_t struct_word_offset,
                               uint16_t data_words, uint16_t ptr_words,
-                              const struct_schema_t *schema, int depth);
+                              schema_idx_t schema, int depth);
 
-static int validate_pointer_slot(const capnp_msg_t *m, int64_t ptr_word_offset,
+static int validate_pointer_slot(const capnp_msg_t *m,
+                                 const schema_table_t *table,
+                                 int64_t ptr_word_offset,
                                  const pointer_schema_t *pschema, int depth)
 {
     if (depth > CAPNP_MAX_DEPTH) {
@@ -80,7 +84,7 @@ static int validate_pointer_slot(const capnp_msg_t *m, int64_t ptr_word_offset,
         if (!in_bounds(m, target_offset, total)) {
             return 0;
         }
-        return validate_struct_at(m, target_offset, ptr.data_words,
+        return validate_struct_at(m, table, target_offset, ptr.data_words,
                                   ptr.ptr_words, pschema->element_struct,
                                   depth + 1);
     }
@@ -132,7 +136,7 @@ static int validate_pointer_slot(const capnp_msg_t *m, int64_t ptr_word_offset,
             for (uint32_t i = 0; i < elem_count; i++) {
                 int64_t elem_offset =
                     target_offset + 1 + (int64_t)(i * elem_words);
-                if (!validate_struct_at(m, elem_offset, tag.data_words,
+                if (!validate_struct_at(m, table, elem_offset, tag.data_words,
                                         tag.ptr_words, pschema->element_struct,
                                         depth + 1)) {
                     return 0;
@@ -158,19 +162,28 @@ static int validate_pointer_slot(const capnp_msg_t *m, int64_t ptr_word_offset,
     }
 }
 
-static int validate_struct_at(const capnp_msg_t *m, int64_t struct_word_offset,
+static int validate_struct_at(const capnp_msg_t *m,
+                              const schema_table_t *table,
+                              int64_t struct_word_offset,
                               uint16_t data_words, uint16_t ptr_words,
-                              const struct_schema_t *schema, int depth)
+                              schema_idx_t schema, int depth)
 {
-    if (!schema) {
+    /* SCHEMA_IDX_NONE is "no validation requested", which must stay distinct
+     * from a malformed index: the accessor returns NULL for both, and a
+     * caller opt-out must not silently become a rejection. */
+    if (schema == SCHEMA_IDX_NONE) {
         return 1;
     }
-    if (data_words < schema->data_words) {
+    const struct_schema_t *ss = schema_struct(table, schema);
+    if (!ss) {
+        return 0;
+    }
+    if (data_words < ss->data_words) {
         return 0; /* fewer data words present than the schema requires:
                    * reject rather than read past what's actually there */
     }
 
-    uint16_t slots_to_check = schema->pointer_count;
+    uint16_t slots_to_check = ss->pointer_count;
     if (slots_to_check > ptr_words) {
         /* Fewer pointer slots present than the schema declares: the
          * missing ones are equivalent to null per Cap'n Proto's own
@@ -182,8 +195,18 @@ static int validate_struct_at(const capnp_msg_t *m, int64_t struct_word_offset,
 
     int64_t ptr_section_start = struct_word_offset + data_words;
     for (uint16_t i = 0; i < slots_to_check; i++) {
-        if (!validate_pointer_slot(m, ptr_section_start + i,
-                                   &schema->pointers[i], depth)) {
+        /* first_pointer + i must stay inside the pointer array: a table whose
+         * run would overrun its own array is malformed, not a message to
+         * accept. */
+        if (ss->first_pointer == SCHEMA_IDX_NONE) {
+            return 0;
+        }
+        uint32_t pi = (uint32_t)ss->first_pointer + i;
+        if (pi >= (uint32_t)table->pointer_count) {
+            return 0;
+        }
+        if (!validate_pointer_slot(m, table, ptr_section_start + i,
+                                   &table->pointers[pi], depth)) {
             return 0;
         }
     }
@@ -191,10 +214,14 @@ static int validate_struct_at(const capnp_msg_t *m, int64_t struct_word_offset,
 }
 
 int capnp_validate_message(const void *msg, size_t len,
-                           const struct_schema_t *schema)
+                           const schema_table_t *table,
+                           schema_idx_t schema)
 {
-    if (!schema) {
+    if (schema == SCHEMA_IDX_NONE) {
         return 1;
+    }
+    if (!schema_struct(table, schema)) {
+        return 0;
     }
     if (!msg || len < 8) {
         return 0;
@@ -240,7 +267,7 @@ int capnp_validate_message(const void *msg, size_t len,
         /* A null root is a validly-encoded "all fields default"
          * message; whether zero data/pointer words satisfies the
          * schema is exactly what validate_struct_at already checks. */
-        return validate_struct_at(&m, 0, 0, 0, schema, 0);
+        return validate_struct_at(&m, table, 0, 0, 0, schema, 0);
     }
     if (root.tag != CAPNP_PTR_STRUCT) {
         return 0; /* the root of a message must be a struct, per spec */
@@ -251,6 +278,6 @@ int capnp_validate_message(const void *msg, size_t len,
     if (!in_bounds(&m, target_offset, total)) {
         return 0;
     }
-    return validate_struct_at(&m, target_offset, root.data_words,
+    return validate_struct_at(&m, table, target_offset, root.data_words,
                               root.ptr_words, schema, 0);
 }
