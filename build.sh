@@ -4,7 +4,8 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$ROOT/build"
 mkdir -p "$BUILD"
-export PATH="/usr/lib/llvm-18/bin:$PATH"
+LLVM_BIN="${LLVM_BIN:-/usr/lib/llvm-18/bin}"
+export PATH="$LLVM_BIN:$PATH"
 
 # The userspace init image must exist and be current -- it's embedded
 # directly into the kernel binary (see boot.S's .incbin), not
@@ -16,17 +17,30 @@ export PATH="/usr/lib/llvm-18/bin:$PATH"
 #
 # INIT_MACHO is a plain build-time choice, deliberately not something
 # the kernel itself (kernel.c, boot.S) has any opinion about -- see
-# include/init_abi.h's own note on why. This project's own reference
-# init implementation lives in coreinit/ and is what build_coreinit.sh
-# below produces; INIT_MACHO can be pointed at any other Mach-O image
-# exposing the same one entry-point convention instead, with no change
-# to anything under kernel/.
+# include/init_abi.h's own note on why. The reference init implementation
+# is no longer in this repo at all -- it lives in a separate repository,
+# located here via COREINIT_ROOT (default ../otos-coreinit), and is built
+# by that repo's own build_coreinit.sh, whose output is
+# $COREINIT_ROOT/build/coreinit.macho; INIT_MACHO can still be pointed at
+# any other Mach-O image exposing the same one entry-point convention
+# instead, with no change to anything under kernel/.
 if [ -z "$INIT_MACHO" ]; then
-    "$ROOT/build_coreinit.sh"
-    INIT_MACHO="$BUILD/coreinit.macho"
+    COREINIT_ROOT="${COREINIT_ROOT:-$ROOT/../otos-coreinit}"
+    # This message is the first thing a newcomer hits when the sibling repo
+    # sits somewhere other than the default or is absent, so it names the
+    # variable and the path actually tried; it is deliberately symmetric with
+    # otos-coreinit's own SASKI_ROOT error, so the cross-repo handshake reads
+    # as one convention rather than two dialects.
+    if [ ! -f "$COREINIT_ROOT/build_coreinit.sh" ]; then
+        echo "build.sh: COREINIT_ROOT not found -- no build_coreinit.sh at $COREINIT_ROOT/build_coreinit.sh. Set COREINIT_ROOT to the path of the otos-coreinit repository (default: $ROOT/../otos-coreinit)." >&2
+        exit 1
+    fi
+    sh "$COREINIT_ROOT/build_coreinit.sh"
+    INIT_MACHO="$COREINIT_ROOT/build/coreinit.macho"
 fi
 
-CC=clang-18
+CC="${CC:-clang-18}"
+LD64="${LD64:-ld64.lld}"
 TARGET=x86_64-apple-darwin
 CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -fpie -mno-red-zone -mno-sse -mno-mmx -Wall -Wextra -I$ROOT/kernel -I$ROOT/include -O1 -g"
 "$CC" -target $TARGET -c "$ROOT/kernel/boot.S" \
@@ -46,13 +60,13 @@ CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -fpie -mno-
 # virtual address 0 -- which directly collided with firmware-owned low
 # memory. Confirmed the hard way with GDB: OVMF places the ACPI RSDP at
 # a firmware-chosen address (observed as low as 0x2469b, as high as
-# 0x777e000 depending on VM RAM size -- see coreinit/acpi.c and boot.S
+# 0x777e000 depending on VM RAM size -- see the otos-coreinit repository's acpi.c and this project's own boot.S
 # for the full story) that a vmaddr-0 kernel could easily collide with,
 # and once did, silently overwriting it before init's own acpi_discover
 # ever got a chance to find it. A real __PAGEZERO segment of this size
 # pushes __TEXT's own vmaddr up to 0x1000000 (16MB), safely clear of
 # every firmware-owned low-memory structure actually observed so far.
-ld64.lld -arch x86_64 -platform_version macos 10.12 10.12 \
+"$LD64" -arch x86_64 -platform_version macos 10.12 10.12 \
     -e _start -pagezero_size 0x1000000 \
     -o "$BUILD/saski_raw.macho" \
     "$BUILD/boot.o" "$BUILD/kernel.o" "$BUILD/serial.o" \
