@@ -40,8 +40,11 @@ traded for a zero, which C code can report. Magic is checked first because
 .global _start
 _start:
     /* x0 is the DTB. Store it before anything else can clobber it. */
-    adrp x9, g_fdt_blob_phys
-    add  x9, x9, :lo12:g_fdt_blob_phys
+    /* ldr =sym rather than adrp/add: both should work, but ldr =sym is one
+     * instruction and puts the address in a literal pool the linker fills,
+     * which is easier to audit than a PC-relative pair whose correctness
+     * depends on the linker processing the relocation. */
+    ldr  x9, =g_fdt_blob_phys
     str  x0, [x9]
 
     /* Validate, guarded: a null blob, or one whose first word is not the
@@ -65,18 +68,15 @@ _start:
      * every block offset against it. */
     ldr w12, [x0, #4]
     rev w12, w12
-    adrp x9, g_fdt_blob_size
-    add  x9, x9, :lo12:g_fdt_blob_size
+    ldr  x9, =g_fdt_blob_size
     str  x12, [x9]
     b    fdt_ok
 
 no_fdt:
     /* Zero both, so C sees "no blob" rather than a garbage length. */
-    adrp x9, g_fdt_blob_phys
-    add  x9, x9, :lo12:g_fdt_blob_phys
+    ldr  x9, =g_fdt_blob_phys
     str  xzr, [x9]
-    adrp x9, g_fdt_blob_size
-    add  x9, x9, :lo12:g_fdt_blob_size
+    ldr  x9, =g_fdt_blob_size
     str  xzr, [x9]
 
 fdt_ok:
@@ -86,8 +86,7 @@ fdt_ok:
     /* Stack. The linker places this image at its own vmaddr; the stack lives
      * at the end of the image's own data so it needs no separate allocation
      * and cannot collide with the blob, which sits wherever firmware put it. */
-    adrp x9, _stack_top
-    add  x9, x9, :lo12:_stack_top
+    ldr  x9, =_stack_top
     mov  sp, x9
 
     /* Enter C. The aarch64 kernel_boot is not the x86 one: that function is

@@ -1,4 +1,4 @@
-#include "arch_x86_64.h"
+#include "arch.h"
 #include "cap.h"
 #include "macho.h"
 #include "mode.h"
@@ -407,6 +407,12 @@ static uint32_t xnu_boot_args_find_rsdp(void)
     return acpi1_addr ? xnu_efi_translate_virt(args, acpi1_addr) : 0;
 }
 
+#ifdef __x86_64__
+/* The AP bring-up path is x86-only: it builds x86 page tables and
+ * loads cr3, and it Mach-O-loads an init copy whose entry convention is
+ * the x86 one. The aarch64 equivalent will use PSCI CPU_ON and its own
+ * boot path. Gated rather than shared so the two architectures have
+ * separate, readable AP paths instead of an #ifdef ladder. */
 void kernel_boot_ap(uint64_t region_base);
 
 /* Set once, by the BSP's own kernel_boot, and never touched again by
@@ -564,6 +570,8 @@ void kernel_boot(void)
     kprintf("[kernel] PANIC: init returned\n");
     halt_forever();
 }
+#endif /* __x86_64__ */
+
 
 /* The AP entry point: reached via the real-mode trampoline (see
  * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
@@ -594,6 +602,470 @@ void kernel_boot(void)
  * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
  * revisiting together with the rest of AP bring-up if that ever stops
  * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+#ifdef __x86_64__
+/* The AP bring-up path is x86-only: it builds x86 page tables and
+ * loads cr3, and it Mach-O-loads an init copy whose entry convention is
+ * the x86 one. The aarch64 equivalent will use PSCI CPU_ON and its own
+ * boot path. Gated rather than shared so the two architectures have
+ * separate, readable AP paths instead of an #ifdef ladder. */
+#endif /* __x86_64__ */
+
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+
+/* The AP entry point: reached via the real-mode trampoline (see
+ * coreinit/ap_trampoline.S) -- an AP has no boot module list, nothing.
+ * `region_base` is this core's own assigned region (see
+ * include/smp_layout.h), passed in RDI by the trampoline's final jump,
+ * per ordinary SysV calling convention.
+ *
+ * This function, and everything it calls, exists in a genuinely
+ * separate physical copy of this entire kernel image -- init copied
+ * the whole thing (code and data together) into region_base before ever
+ * sending SIPI, specifically so this instance's own static state
+ * (the factory object, everything kernel_cap_bootstrap builds) is
+ * this core's own, not shared with the BSP's. See kernel_boot's own
+ * -fpie note in build.sh for why copying code+data together, rather
+ * than just data, is what makes this correct. */
+#define PTE_PRESENT 0x1ull
+#define PTE_WRITABLE 0x2ull
+#define PTE_HUGE 0x80ull
+
+/* Builds a fresh, independent identity map -- GB0 (0-0x40000000) and
+ * GB3 (0xC0000000-0xFFFFFFFF, for LAPIC/IOAPIC MMIO) -- at four fixed,
+ * 4KB-aligned offsets within this AP's own per-core region. Narrower
+ * than boot.S's own setup_identity_map32, which covers the full 4GB
+ * (GB0-GB3 contiguously) -- that breadth is specifically because GRUB's
+ * xnu relocator chooses this kernel's own load address, which this
+ * function doesn't need to worry about (an AP's own region is placed
+ * by THIS project's own SMP bring-up code, at a known, fixed address --
+ * see CORE_REGION_BASE), so GB0+GB3 stays sufficient here. Worth
+ * revisiting together with the rest of AP bring-up if that ever stops
+ * being true. Returns the new PML4's physical address. */
+#ifdef __x86_64__
+/* The AP bring-up path is x86-only: it builds x86 page tables and
+ * loads cr3, and it Mach-O-loads an init copy whose entry convention is
+ * the x86 one. The aarch64 equivalent will use PSCI CPU_ON and its own
+ * boot path. Gated rather than shared so the two architectures have
+ * separate, readable AP paths instead of an #ifdef ladder. */
 static uint64_t build_ap_page_tables(uint64_t region_base)
 {
     uint64_t pml4_phys = region_base + CORE_PGTABLE_OFFSET + CORE_PGTABLE_PML4_OFF;
@@ -700,3 +1172,5 @@ void kernel_boot_ap(uint64_t region_base)
     kprintf("[kernel] AP PANIC: init returned\n");
     halt_forever();
 }
+#endif /* __x86_64__ */
+

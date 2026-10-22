@@ -1,41 +1,26 @@
-#include "arch_x86_64.h"
 #include "serial.h"
 #include <stdarg.h>
 #include <stdint.h>
 
-/* QEMU's default ISA serial port (COM1) I/O base address. */
-#define COM1 0x3F8
-
-void serial_init(void)
-{
-    outb(COM1 + 1, 0x00); /* disable interrupts */
-    outb(COM1 + 3, 0x80); /* enable DLAB */
-    outb(COM1 + 0, 0x03); /* divisor low byte: 38400 baud */
-    outb(COM1 + 1, 0x00); /* divisor high byte */
-    outb(COM1 + 3, 0x03); /* 8 bits, no parity, one stop bit */
-    outb(COM1 + 2, 0xC7); /* enable FIFO, clear, 14-byte threshold */
-    outb(COM1 + 4, 0x0B); /* IRQs enabled, RTS/DSR set */
-}
-
-static int transmit_empty(void)
-{
-    return inb(COM1 + 5) & 0x20;
-}
-
-static void putc(char c)
-{
-    while (!transmit_empty()) {
-    }
-    outb(COM1, (uint8_t)c);
-}
+/* The formatter half of the kernel console.
+ *
+ * This file is deliberately architecture-neutral: it never touches a port, an
+ * MMIO register, or an inline asm instruction. It calls serial_putc, which the
+ * per-architecture transport file provides. The x86_64 transport is the ISA
+ * COM1 UART through port I/O; the aarch64 transport is QEMU virt's PL011
+ * through MMIO. Both expose the same two functions, so this file compiles
+ * unchanged for either.
+ *
+ * Minimal freestanding formatter: %s %d %u %x %X %c %% only. Enough for
+ * kernel/coreinit bring-up logging; not a general libc printf. */
 
 static void puts_raw(const char *s)
 {
     while (*s) {
         if (*s == '\n') {
-            putc('\r');
+            serial_putc('\r');
         }
-        putc(*s++);
+        serial_putc(*s++);
     }
 }
 
@@ -46,7 +31,7 @@ static void put_uint(unsigned long v, unsigned base, int upper)
     int i = 0;
 
     if (v == 0) {
-        putc('0');
+        serial_putc('0');
         return;
     }
     while (v > 0 && i < (int)sizeof(buf)) {
@@ -54,22 +39,20 @@ static void put_uint(unsigned long v, unsigned base, int upper)
         v /= base;
     }
     while (i > 0) {
-        putc(buf[--i]);
+        serial_putc(buf[--i]);
     }
 }
 
 static void put_int(long v)
 {
     if (v < 0) {
-        putc('-');
+        serial_putc('-');
         put_uint((unsigned long)(-v), 10, 0);
     } else {
         put_uint((unsigned long)v, 10, 0);
     }
 }
 
-/* Minimal freestanding formatter: %s %d %u %x %X %c %% only. Enough for
- * kernel/coreinit bring-up logging; not a general libc printf. */
 void kprintf(const char *fmt, ...)
 {
     va_list ap;
@@ -78,9 +61,9 @@ void kprintf(const char *fmt, ...)
     for (const char *p = fmt; *p; p++) {
         if (*p != '%') {
             if (*p == '\n') {
-                putc('\r');
+                serial_putc('\r');
             }
-            putc(*p);
+            serial_putc(*p);
             continue;
         }
         p++;
@@ -101,14 +84,14 @@ void kprintf(const char *fmt, ...)
             put_uint(va_arg(ap, unsigned int), 16, 1);
             break;
         case 'c':
-            putc((char)va_arg(ap, int));
+            serial_putc((char)va_arg(ap, int));
             break;
         case '%':
-            putc('%');
+            serial_putc('%');
             break;
         default:
-            putc('%');
-            putc(*p);
+            serial_putc('%');
+            serial_putc(*p);
             break;
         }
     }

@@ -76,16 +76,57 @@ EMBEDDED="${EMBEDDED:-0}"
 
 CC="${CC:-clang-18}"
 LD64="${LD64:-ld64.lld}"
-TARGET=x86_64-apple-darwin
-CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -fpie -mno-red-zone -mno-sse -mno-mmx -Wall -Wextra -I$ROOT/kernel -I$ROOT/include -O1 -g"
+if [ "$ARCH" = "aarch64" ]; then
+    TARGET=aarch64-none-elf
+else
+    TARGET=x86_64-apple-darwin
+fi
+# Per-architecture flags. The x86_64 flags are the ones this build has always
+# used; the aarch64 flags drop the x86-specific ones (-mno-red-zone,
+# -mno-sse, -mno-mmx are x86 concepts with no aarch64 meaning) and add
+# -mgeneral-regs-only, because a freestanding kernel must not depend on the
+# floating-point unit being enabled: firmware may leave it off, and touching
+# an FP register with it off is an exception with no handler.
+if [ "$ARCH" = "aarch64" ]; then
+    CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -mgeneral-regs-only -Wall -Wextra -I$ROOT/kernel -I$ROOT/include -O1 -g"
+else
+    CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -fpie -mno-red-zone -mno-sse -mno-mmx -Wall -Wextra -I$ROOT/kernel -I$ROOT/include -O1 -g"
+fi
+if [ "$ARCH" = "aarch64" ]; then
+    "$CC" -target $TARGET -c "$ROOT/arch/boot_aarch64.S" \
+        -o "$BUILD/boot.o"
+else
 "$CC" -target $TARGET -c "$ROOT/kernel/boot.S" \
     -DINIT_MACHO_PATH='"'"$INIT_MACHO"'"' \
     -o "$BUILD/boot.o"
+fi
 "$CC" $CFLAGS -c "$ROOT/kernel/kernel.c" -o "$BUILD/kernel.o"
-"$CC" $CFLAGS -c "$ROOT/kernel/serial.c" -o "$BUILD/serial.o"
+# The serial transport is per-architecture: serial.c is the arch-neutral
+# formatter and calls serial_putc, which the arch's own backend provides. The
+# backend file is selected here rather than by #ifdef inside a shared file,
+# because a file-level split means adding an architecture is one line here and
+# cannot affect the other arch's compile at all. serial_x86_64.c carries its
+# own #error guard in case the selection and the file ever disagree."
+if [ "$ARCH" = "aarch64" ]; then
+    "$CC" $CFLAGS -c "$ROOT/kernel/serial_aarch64.c" -o "$BUILD/serial.o"
+else
+    "$CC" $CFLAGS -c "$ROOT/kernel/serial_x86_64.c" -o "$BUILD/serial.o"
+fi
+# serial.c is the arch-neutral formatter (kprintf); the transport backend
+# selected above provides serial_init/serial_putc. Both are needed: the
+# formatter calls into the transport, so both must be in the link.
+"$CC" $CFLAGS -c "$ROOT/kernel/serial.c" -o "$BUILD/serial_fmt.o"
 "$CC" $CFLAGS -c "$ROOT/kernel/cap.c" -o "$BUILD/cap.o"
 "$CC" $CFLAGS -c "$ROOT/kernel/capnp_validate.c" -o "$BUILD/capnp_validate.o"
 "$CC" $CFLAGS -c "$ROOT/kernel/macho.c" -o "$BUILD/macho.o"
+
+if [ "$ARCH" = "aarch64" ]; then
+    "$CC" $CFLAGS -c "$ROOT/kernel/kernel_boot_aarch64.c" -o "$BUILD/kernel_boot_aarch64.o"
+    # The aarch64 boot path reads the device tree, so lib/fdt.c joins the
+    # link for this arch only. The x86_64 compile list is unchanged: that
+    # platform is described by ACPI and has no caller for the FDT reader.
+    "$CC" $CFLAGS -c "$ROOT/lib/fdt.c" -o "$BUILD/fdt.o"
+fi
 
 # -pagezero_size 0x1000000 (16MB, matching include/smp_layout.h's own
 # KERNEL_LOAD_BASE -- kernel.c's boot_info.kernel_load_base needs the
@@ -117,13 +158,34 @@ if [ "$EMBEDDED" = "1" ]; then
     echo "embedded device tree: $BUILD/saski.dtb ($(wc -c < "$BUILD/saski.dtb" | tr -d ' ') bytes)"
 fi
 
+if [ "$ARCH" = "aarch64" ]; then
+    # The aarch64 link is a plain ELF link with no Mach-O-specific flags.
+    # ld64.lld handles ELF for aarch64 as well as Mach-O for x86_64.
+    # ld64.lld is the Mach-O linker; it does not do ELF. The ELF linker is
+    # ld.lld from the same lld package, which is what a freestanding aarch64
+    # kernel needs. Resolved the same way as LD64 so one env var set covers
+    # both.
+    LDELFD="${LDELFD:-$(dirname "$LD64")/ld.lld}"
+    [ -x "$LDELFD" ] || { echo "build.sh: no ld.lld next to $LD64; set LDELFD" >&2; exit 1; }
+    "$LDELFD" -e _start -Ttext 0x40080000 \
+        -o "$BUILD/saski_raw.macho" \
+        "$BUILD/boot.o" "$BUILD/kernel.o" "$BUILD/serial.o" "$BUILD/serial_fmt.o" \
+        "$BUILD/cap.o" "$BUILD/capnp_validate.o" "$BUILD/macho.o" \
+        "$BUILD/kernel_boot_aarch64.o" "$BUILD/fdt.o" $DROPIN
+    # macho_to_xnu.py is an x86_64 Mach-O converter; an aarch64 image does not
+    # go through it. The raw ELF is the artifact.
+    cp "$BUILD/saski_raw.macho" "$BUILD/saski.macho"
+else
 "$LD64" -arch x86_64 -platform_version macos 10.12 10.12 \
     -e _start -pagezero_size 0x1000000 \
     -o "$BUILD/saski_raw.macho" \
-    "$BUILD/boot.o" "$BUILD/kernel.o" "$BUILD/serial.o" \
+    "$BUILD/boot.o" "$BUILD/kernel.o" "$BUILD/serial.o" "$BUILD/serial_fmt.o" \
     "$BUILD/cap.o" "$BUILD/capnp_validate.o" "$BUILD/macho.o" $DROPIN
+fi
 
-python3 "$ROOT/tools/macho_to_xnu.py" "$BUILD/saski_raw.macho" "$BUILD/saski.macho"
+if [ "$ARCH" != "aarch64" ]; then
+    python3 "$ROOT/tools/macho_to_xnu.py" "$BUILD/saski_raw.macho" "$BUILD/saski.macho"
+fi
 
 echo "built $BUILD/saski.macho"
 file "$BUILD/saski.macho"
