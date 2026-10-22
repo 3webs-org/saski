@@ -79,6 +79,36 @@ size_t fdt_memory_ranges(const void *blob, fdt_range_t *out, size_t max);
  * currently lives). Returns the number of ranges actually written. */
 size_t fdt_reserved_ranges(const void *blob, fdt_range_t *out, size_t max);
 
+/* Enumerates a node's children with a caller-held cursor, which is what a
+ * caller walking /cpus or /intc actually wants: initialise *cursor to 0 and
+ * call until it returns 0. The callee advances the cursor. This is a wrapper
+ * over fdt_first_child/fdt_next_sibling rather than a second walk, so there is
+ * one implementation and no chance of the two disagreeing. */
+int fdt_next_child(const void *blob, int parent_offset, int *cursor);
+
+/* Returns 1 if the node is present and not marked disabled, 0 otherwise.
+ * A node is enabled unless its own "status" property says otherwise: "okay"
+ * and "ok" mean enabled, an absent status means enabled, anything else means
+ * disabled. Enumerating a disabled device or CPU is worse than not finding it,
+ * because it yields a plausible count that does not exist. */
+int fdt_is_enabled(const void *blob, int node_offset);
+
+/* Reads a node's #address-cells / #size-cells WITH INHERITANCE from the nearest
+ * ancestor that declares them, since that is how a reg entry's width is
+ * determined. Exposed rather than re-derived at call sites: getting the
+ * inheritance wrong is the most common DTB bug and it silently misreads every
+ * reg in the tree instead of failing. Either out-pointer may be NULL. */
+int fdt_cell_counts(const void *blob, int node_offset, int *out_address_cells,
+                    int *out_size_cells);
+
+/* Reads a node's reg entry and translates it to a CPU-visible address,
+ * applying every enclosing bus's ranges mapping. Writes base/size (either may
+ * be NULL) and returns 1, or 0 when there is no such entry. This is the
+ * two-out-parameter form of fdt_reg_to_cpu_addr, which fills an fdt_range_t;
+ * both share one implementation. */
+int fdt_reg_to_addr(const void *blob, int node_offset, uint64_t *out_base,
+                    uint64_t *out_size);
+
 /* Resolves a full path such as "/soc/serial@1000" to a node offset, or
  * FDT_ERR_NODE if no such node exists. "/" resolves to the root node. The
  * comparison is exact: "serial@1000" does not match "serial@1001", and the
@@ -113,7 +143,12 @@ int fdt_parent_offset(const void *blob, int node_offset);
  * and a driver registered for the second entry is still the right driver. Only
  * matching the first entry is a classic DTB bug, so it is called out here.
  * Returns FDT_ERR_NODE if nothing matches. */
-int fdt_node_by_compatible(const void *blob, const char *compatible);
+int fdt_node_by_compatible_offset(const void *blob, const char *compatible);
+
+/* Same search, reporting through an out-pointer: returns 1 when found and 0
+ * when not, so "found nothing" cannot be confused with a valid offset of 0. */
+int fdt_node_by_compatible(const void *blob, const char *compatible,
+                           int *out_offset);
 
 /* Reads a node's own "#address-cells"/"#size-cells", which size its children's
  * "reg" entries per spec. The values are inherited from the nearest ancestor

@@ -474,7 +474,7 @@ static int compatible_match(const char *list, uint32_t len, const char *want)
     return 0;
 }
 
-int fdt_node_by_compatible(const void *blob, const char *compatible)
+int fdt_node_by_compatible_offset(const void *blob, const char *compatible)
 {
     ctx_t c;
     if (!compatible || !ctx_init(blob, &c)) {
@@ -753,4 +753,85 @@ size_t fdt_memory_ranges(const void *blob, fdt_range_t *out, size_t max)
         }
     }
     return count;
+}
+
+
+int fdt_next_child(const void *blob, int parent_offset, int *cursor)
+{
+    if (!cursor) {
+        return 0;
+    }
+    int c = (*cursor == 0) ? fdt_first_child(blob, parent_offset)
+                           : fdt_next_sibling(blob, parent_offset, *cursor);
+    if (c == FDT_ERR_NODE) {
+        *cursor = 0;
+        return 0;
+    }
+    *cursor = c;
+    return c;
+}
+
+int fdt_node_by_compatible(const void *blob, const char *compatible,
+                           int *out_offset)
+{
+    int off = fdt_node_by_compatible_offset(blob, compatible);
+    if (off == FDT_ERR_NODE) {
+        return 0;
+    }
+    if (out_offset) {
+        *out_offset = off;
+    }
+    return 1;
+}
+
+int fdt_is_enabled(const void *blob, int node_offset)
+{
+    uint32_t len = 0;
+    const char *st = (const char *)fdt_getprop(blob, node_offset, "status", &len);
+
+    if (!st || len == 0) {
+        return 1; /* absent means enabled, per spec */
+    }
+    /* The value is a NUL-terminated string within a property whose length
+     * includes that terminator; comparing against the bounded length avoids
+     * reading past it into the next property. */
+    if (len >= 5 && st[0] == 'o' && st[1] == 'k' && st[2] == 'a' && st[3] == 'y') {
+        return 1;
+    }
+    if (len >= 3 && st[0] == 'o' && st[1] == 'k' && (st[2] == 0 || len == 3)) {
+        return 1;
+    }
+    return 0;
+}
+
+int fdt_cell_counts(const void *blob, int node_offset, int *out_address_cells,
+                    int *out_size_cells)
+{
+    uint32_t ac = 0, sc = 0;
+    if (!fdt_parent_cells(blob, node_offset, &ac, &sc)) {
+        return 0;
+    }
+    if (out_address_cells) {
+        *out_address_cells = (int)ac;
+    }
+    if (out_size_cells) {
+        *out_size_cells = (int)sc;
+    }
+    return 1;
+}
+
+int fdt_reg_to_addr(const void *blob, int node_offset, uint64_t *out_base,
+                    uint64_t *out_size)
+{
+    fdt_range_t r;
+    if (!fdt_reg_to_cpu_addr(blob, node_offset, 0, &r)) {
+        return 0;
+    }
+    if (out_base) {
+        *out_base = r.base;
+    }
+    if (out_size) {
+        *out_size = r.size;
+    }
+    return 1;
 }
