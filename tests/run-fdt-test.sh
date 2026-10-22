@@ -27,12 +27,22 @@ BUILD="$ROOT/build/fdt-test"
 if [ -z "$CC" ]; then
     if command -v xcrun >/dev/null 2>&1; then
         CC=$(xcrun -f clang)
-        SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
-        export SDKROOT
     else
         CC=cc
     fi
 fi
+
+# SDKROOT is resolved INDEPENDENTLY of where CC came from. Tying it to the
+# "CC was unset" branch meant that passing CC in from the environment silently
+# lost the system header search path, and the failure surfaced as
+# "stdio.h file not found" -- which reads like a missing library rather than a
+# missing search path, and is exactly the sort of diagnostic that sends the
+# next person looking in the wrong place. A compiler and the headers it needs
+# are one thing; finding one should never skip finding the other.
+if [ -z "$SDKROOT" ] && command -v xcrun >/dev/null 2>&1; then
+    SDKROOT=$(xcrun --show-sdk-path 2>/dev/null || true)
+fi
+[ -n "$SDKROOT" ] && export SDKROOT
 DTC="${DTC:-}"
 
 mkdir -p "$BUILD"
