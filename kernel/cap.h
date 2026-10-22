@@ -67,6 +67,16 @@ typedef struct initial_capabilities {
  * BOOKKEEPING memory too doesn't cross into new territory, it just
  * removes the one thing that was still kernel-owned and therefore
  * kernel-bounded. */
+/* The number of data words CREATE's request struct carries: handlerFn,
+ * handlerData, schemaTable, schemaIndex, recordStorage. Named here rather than
+ * written into the schema table (and into the consumer repo) as a bare literal,
+ * because the kernel validates the request against this count and the caller
+ * builds to it: one constant both sides read is the only way they cannot
+ * silently disagree. A disagreement is not silent in practice -- the kernel
+ * rejects every create with a structural-validation failure -- but a single
+ * source means it cannot happen at all. */
+#define CAP_CREATE_REQUEST_WORDS 5
+
 #define CAP_RECORD_SIZE 64
 #define CAP_RECORD_ALIGN 16
 
