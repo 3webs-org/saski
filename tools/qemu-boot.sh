@@ -53,6 +53,9 @@ COREINIT_ROOT="${COREINIT_ROOT:-$ROOT/../otos-coreinit}"
 DEPS_DIR="${DEPS_DIR:-$SASKI_BUILD/qemu-deps}"
 BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-60}"
 SMP_CPUS="${SMP_CPUS:-4}"
+BUILD="${BUILD:-0}"
+CC="${CC:-}"
+LD64="${LD64:-}"
 KEEP_ISO="${KEEP_ISO:-}"
 FETCH_DEPS="${FETCH_DEPS:-1}"
 
@@ -201,6 +204,64 @@ resolve_and_report() {
 # than hardcoding them: the header is the source of truth, and an assertion
 # that duplicates a constant cannot catch that constant changing.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# A judge is worthless if it judges the wrong image.
+#
+# Two distinct ways that happens, and both produce a confident green or a
+# confusing failure that has nothing to do with the kernel. The first: the
+# image is stale -- sources changed, nobody rebuilt, and the run reports on
+# the previous kernel. The second: the image is current but the init image
+# EMBEDDED inside it is not, because boot.S .incbin's coreinit at build time,
+# so a kernel can be fresh while carrying an old init.
+#
+# So this step refuses to proceed on a stale image, and grade() below asserts
+# the init length the kernel reports matches the init file actually on disk.
+# Together they close both holes, and neither depends on trusting a build log.
+check_image() {
+    if [ "$BUILD" = "1" ]; then
+        say "BUILD=1: rebuilding the kernel first"
+        if [ -z "$CC" ]; then
+            CC=$(xcrun -f clang 2>/dev/null) || fail "BUILD=1 but no CC could be resolved (xcrun clang not found) -- set CC explicitly"
+        fi
+        if [ -z "$LD64" ]; then
+            LD64=$(ls -d /nix/store/*-lld-18*/bin/ld64.lld 2>/dev/null | head -1)
+            [ -n "$LD64" ] || fail "BUILD=1 but no LD64 could be resolved -- set LD64 to an ld64.lld"
+        fi
+        INIT="${INIT_MACHO:-$COREINIT_ROOT/build/coreinit.macho}"
+        [ -f "$INIT" ] || fail "BUILD=1 but no init image at $INIT -- build the sibling repo first"
+        say "  CC=$CC"
+        say "  LD64=$LD64"
+        say "  INIT_MACHO=$INIT"
+        ( cd "$ROOT" && CC="$CC" LD64="$LD64" INIT_MACHO="$INIT" sh ./build.sh ) \
+            || fail "BUILD=1 but build.sh failed"
+    fi
+
+    KERNEL="$SASKI_BUILD/saski.macho"
+    [ -f "$KERNEL" ] || fail "no kernel image at $KERNEL -- run build.sh first, or pass BUILD=1"
+
+    newest=0
+    for f in "$ROOT"/kernel/*.c "$ROOT"/kernel/*.h "$ROOT"/kernel/*.S "$ROOT"/include/*.h \
+             "$COREINIT_ROOT"/coreinit/*.c "$COREINIT_ROOT"/coreinit/*.h \
+             "$COREINIT_ROOT"/coreinit/*.S "$COREINIT_ROOT/build/coreinit.macho"; do
+        [ -f "$f" ] || continue
+        t=$(date -r "$f" +%s 2>/dev/null) || continue
+        [ "$t" -gt "$newest" ] && newest=$t
+    done
+    kt=$(date -r "$KERNEL" +%s 2>/dev/null) || kt=0
+    if [ "$newest" -gt "$kt" ]; then
+        fail "$KERNEL is STALE -- a source file is newer than the image. Rebuild (or pass BUILD=1). Judging a stale image is a green result from a test that did not test the thing."
+    fi
+    say "image freshness: kernel is newer than every source and than the init it embeds"
+
+    INITIMG="$COREINIT_ROOT/build/coreinit.macho"
+    if [ -f "$INITIMG" ]; then
+        INIT_BYTES=$(wc -c < "$INITIMG" | tr -d ' ')
+        say "init image on disk: $INIT_BYTES bytes (the kernel's own report must match this)"
+    else
+        INIT_BYTES=""
+    fi
+}
+
 preflight() {
     KERNEL="$SASKI_BUILD/saski.macho"
     [ -f "$KERNEL" ] || fail "no kernel image at $KERNEL -- run build.sh first"
@@ -425,6 +486,20 @@ grade() {
         fi
     fi
 
+    # The kernel .incbin's init at build time, so a fresh kernel can still
+    # carry a stale init. The kernel prints the length it embedded; compare it
+    # with the init file actually on disk. A mismatch means the run judged a
+    # kernel built against an older init, and any conclusion about init
+    # behaviour would be about code that is not in the tree.
+    emb=$(sed -n 's/.*embedded init image: \([0-9][0-9]*\) bytes.*/\1/p' "$log" | head -1)
+    if [ -n "$emb" ] && [ -n "$INIT_BYTES" ]; then
+        say "embedded init: kernel reports $emb bytes, disk has $INIT_BYTES bytes"
+        if [ "$emb" != "$INIT_BYTES" ]; then
+            say "FAIL: the embedded init does not match the init on disk -- this run judged a stale init"
+            return 1
+        fi
+    fi
+
     say "node joins observed: $joins (SMP_CPUS=$SMP_CPUS)"
     say "AP ACPI discovery failures: $apfails"
     say "highest contiguous tier reached: T$tier"
@@ -459,6 +534,7 @@ main() {
     mkdir -p "$WORK"
     timeout_selftest
     fetch_deps
+    check_image
     resolve_and_report
     preflight
 
