@@ -39,6 +39,32 @@ if [ -z "$INIT_MACHO" ]; then
     INIT_MACHO="$COREINIT_ROOT/build/coreinit.macho"
 fi
 
+# Two INDEPENDENT build axes. Do not couple them.
+#
+# ARCH selects the compile list and the boot path: which architecture-specific
+# sources are built and how the kernel is entered. Defaults to x86_64, and the
+# x86_64 path below is untouched by anything in this block -- adding an arch
+# must never perturb an existing one, which is why the default branch is the
+# old branch.
+ARCH="${ARCH:-x86_64}"
+
+# EMBEDDED selects whether data a platform would otherwise be HANDED at boot is
+# instead compiled into the image. This is orthogonal to ARCH, deliberately:
+# an aarch64 image can be built to trust a firmware-supplied device tree, or to
+# carry its own and trust nothing; the same choice exists on any platform with
+# an equivalent input. Deciding it by ARCH would be wrong in exactly the case
+# that matters -- an aarch64 target whose firmware does hand over a good DTB and
+# which therefore has no reason to spend flash on a copy.
+#
+# When EMBEDDED=1 on a device-tree platform, arch/qemu-virt.dts is compiled with
+# dtc and arch/dt_blob.S .incbin's the result into the image. When EMBEDDED=0 no
+# blob is built and no blob is linked, so the image contains only what it uses.
+#
+# Default 0, for every arch. That is what keeps this change invisible to the
+# existing build: with no flags set, the compile list and the link inputs are
+# exactly what they were.
+EMBEDDED="${EMBEDDED:-0}"
+
 CC="${CC:-clang-18}"
 LD64="${LD64:-ld64.lld}"
 TARGET=x86_64-apple-darwin
@@ -66,11 +92,27 @@ CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -fpie -mno-
 # ever got a chance to find it. A real __PAGEZERO segment of this size
 # pushes __TEXT's own vmaddr up to 0x1000000 (16MB), safely clear of
 # every firmware-owned low-memory structure actually observed so far.
+# The device tree, when this build is asked to carry one. Gated on EMBEDDED
+# alone -- not on ARCH -- because whether a kernel trusts a firmware-supplied
+# tree or carries its own is a deployment decision, not a property of the
+# instruction set. See the axes block at the top.
+DROPIN=""
+if [ "$EMBEDDED" = "1" ]; then
+    DTC="${DTC:-dtc}"
+    "$DTC" -I dts -O dtb -o "$BUILD/saski.dtb" "$ROOT/arch/qemu-virt.dts" \
+        || { echo "build.sh: dtc failed on arch/qemu-virt.dts" >&2; exit 1; }
+    "$CC" -target $TARGET -c "$ROOT/arch/dt_blob.S" \
+        -DDTB_PATH='"'"$BUILD/saski.dtb"'"' \
+        -o "$BUILD/dt_blob.o"
+    DROPIN="$BUILD/dt_blob.o"
+    echo "embedded device tree: $BUILD/saski.dtb ($(wc -c < "$BUILD/saski.dtb" | tr -d ' ') bytes)"
+fi
+
 "$LD64" -arch x86_64 -platform_version macos 10.12 10.12 \
     -e _start -pagezero_size 0x1000000 \
     -o "$BUILD/saski_raw.macho" \
     "$BUILD/boot.o" "$BUILD/kernel.o" "$BUILD/serial.o" \
-    "$BUILD/cap.o" "$BUILD/capnp_validate.o" "$BUILD/macho.o"
+    "$BUILD/cap.o" "$BUILD/capnp_validate.o" "$BUILD/macho.o" $DROPIN
 
 python3 "$ROOT/tools/macho_to_xnu.py" "$BUILD/saski_raw.macho" "$BUILD/saski.macho"
 

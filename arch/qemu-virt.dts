@@ -1,0 +1,140 @@
+/* SPDX-License-Identifier: 0BSD */
+/*
+ * The device tree this kernel is built with, as SOURCE. It is compiled to a
+ * blob by dtc during the build and embedded directly into the kernel image
+ * (see boot.S's own .incbin, the same mechanism the init image uses), so the
+ * kernel carries its own description of the machine.
+ *
+ * WHY COMPILE IT IN RATHER THAN CARRY SOURCE AND PARSE AT BOOT. Parsing a
+ * textual device-tree source needs a parser, a lexer and a string pool in the
+ * kernel -- tens of kilobytes of code and, worse, working buffers. The blob
+ * format is a flat, byte-addressable, zero-copy structure that fdt.c walks
+ * directly out of read-only memory. On a target with 32 KiB of RAM the
+ * difference is not an optimisation, it is the difference between fitting and
+ * not: a compiled-in blob costs flash and no RAM at all, and every byte the
+ * kernel does not have to allocate is a byte the scheduler can hand to work.
+ *
+ * It is also the config that travels with the image. A board is described by
+ * the tree the kernel was built for; embedding it removes any possibility of
+ * the running kernel and the machine it believes it is on disagreeing, which
+ * is a class of bug that only ever shows up on somebody else's hardware.
+ *
+ * FIRMWARE MAY REPLACE IT. On the standard arm64 boot protocol the firmware
+ * passes its own DTB in x0, and that one describes the ACTUAL machine, which
+ * can legitimately differ from the build-time tree (extra memory, a board
+ * revision, devices the build could not know about). So the embedded blob is
+ * the fallback and the baseline, not a veto: init_boot_info.fdt_blob_phys
+ * carries whatever the boot path discovered, and the embedded blob is used
+ * when that is 0. Both paths go through the same fdt.c, so the reader never
+ * has two behaviours to get wrong.
+ *
+ * This one describes QEMU's -machine virt, which is what the aarch64 boot path
+ * is developed and tested against. It is deliberately a real tree rather than
+ * a placeholder: the addresses below are the ones QEMU actually uses, so the
+ * same tree exercises the reader against something concrete.
+ */
+
+/dts-v1/;
+
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "linux,dummy-virt";
+    model = "saski reference machine (QEMU virt)";
+
+    /* 512 MiB starting at 1 GiB: the conventional QEMU virt RAM window.
+     * The kernel discovers the real figure through fdt_memory_ranges and
+     * cross-checks it against what the boot path reported, rather than
+     * trusting either one alone. */
+    memory@40000000 {
+        device_type = "memory";
+        reg = <0x0 0x40000000 0x0 0x20000000>;
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        compatible = "linux,dummy-virt";
+
+        /* reg is the MPIDR affinity value, which is the identity the
+         * scheduler uses as a node id. Four cores, matching the reference
+         * SMP configuration. */
+        cpu@0 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57", "arm,armv8";
+            reg = <0x0>;
+        };
+        cpu@1 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57", "arm,armv8";
+            reg = <0x1>;
+        };
+        cpu@2 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57", "arm,armv8";
+            reg = <0x2>;
+        };
+        cpu@3 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57", "arm,armv8";
+            reg = <0x3>;
+        };
+    };
+
+    /* The system bus. ranges is identity here because QEMU virt maps its
+     * peripherals at the same addresses the CPU sees -- which is exactly
+     * why fdt_reg_to_cpu_addr must not be validated ONLY against this
+     * tree. See the test suite's deliberately non-identity ranges. */
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        compatible = "simple-bus";
+        ranges;
+
+        /* GICv3: distributor and redistributors. The second compatible
+         * entry is the generic one, which is why the reader matches every
+         * string in the list rather than only the first. */
+        intc: interrupt-controller@8000000 {
+            compatible = "arm,gic-v3";
+            reg = <0x08000000 0x00010000>,   /* distributor */
+                  <0x080a0000 0x00f60000>;   /* redistributors */
+            interrupt-controller;
+            #interrupt-cells = <3>;
+        };
+
+        /* PL011 UART, and the console the kernel speaks on. Marked okay
+         * explicitly rather than relying on an absent status, so the tree
+         * is also a test of fdt_is_enabled's positive case. */
+        serial@9000000 {
+            compatible = "arm,pl011", "arm,primecell";
+            reg = <0x09000000 0x00001000>;
+            interrupts = <0x0 0x1 0x4>;
+            status = "okay";
+        };
+
+        /* The generic timer. The frequency is a CPU property, not a
+         * discovery, so it stays here rather than being guessed. */
+        timer {
+            compatible = "arm,armv8-timer";
+            interrupts = <0x1 0xd 0x4>,
+                         <0x1 0xe 0x4>,
+                         <0x1 0xb 0x4>,
+                         <0x1 0xa 0x4>;
+            always-on;
+        };
+
+        /* A device tree that ships a device disabled expects it ignored.
+         * Present so the enumeration code is exercised on a node it must
+         * skip -- a disabled CPU or device counted as live produces a
+         * plausible-looking core count that does not exist. */
+        serial@9040000 {
+            compatible = "arm,pl011", "arm,primecell";
+            reg = <0x09040000 0x00001000>;
+            status = "disabled";
+        };
+    };
+
+    chosen {
+        bootargs = "";
+    };
+};
