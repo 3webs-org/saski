@@ -52,6 +52,7 @@ SASKI_BUILD="${SASKI_BUILD:-$ROOT/build}"
 COREINIT_ROOT="${COREINIT_ROOT:-$ROOT/../otos-coreinit}"
 DEPS_DIR="${DEPS_DIR:-$SASKI_BUILD/qemu-deps}"
 BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-60}"
+SMP_CPUS="${SMP_CPUS:-4}"
 KEEP_ISO="${KEEP_ISO:-}"
 FETCH_DEPS="${FETCH_DEPS:-1}"
 
@@ -297,7 +298,7 @@ run_qemu() {
     cp "$OVMF_VARS" "$vars_copy"
     log="$WORK/boot-$tag.log"
     rm -f "$log"
-    "$QEMU" -machine q35 -cpu max -m 512 -smp 4 \
+    "$QEMU" -machine q35 -cpu max -m 512 -smp "$SMP_CPUS" \
         -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
         -drive if=pflash,format=raw,file="$vars_copy" \
         -drive file="$disk",format=raw,if=ide,index=0,media=disk \
@@ -327,6 +328,34 @@ run_qemu() {
 # legitimate and useful outcome: it means the loader path works and the kernel
 # started, which is strictly more information than a pass/fail bit.
 # ---------------------------------------------------------------------------
+timeout_selftest() {
+    start=$(date +%s)
+    run_with_timeout 1 sleep 10 >/dev/null 2>&1
+    elapsed=$(( $(date +%s) - start ))
+    [ "$elapsed" -lt 5 ] || fail "timeout mechanism did not interrupt a 10s sleep (took ${elapsed}s) -- the harness would report false negatives"
+    say "timeout self-test OK (interrupted a 10s sleep in ${elapsed}s)"
+}
+
+run_with_timeout() {
+    limit="$1"
+    shift
+    "$@" &
+    pid=$!
+    waited=0
+    while [ "$waited" -lt "$limit" ]; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+    return 0
+}
+
 marker_present() {
     grep -qF "$1" "$2"
 }
@@ -334,14 +363,14 @@ marker_present() {
 grade() {
     log="$1"
     say ""
-    say "=== GRUB stage (last 40 lines) ==="
-    sed -n '1,40p' "$log"
+    say "=== GRUB stage ==="
+    sed -n '1,20p' "$log"
     say ""
     say "=== kernel stage (last 40 lines) ==="
     tail -40 "$log"
     say ""
 
-    for bad in PANIC 'ACCEPTED (bug!)' 'ACPI discovery failed' 'proxy: create failed' 'create_object: FAILED'; do
+    for bad in PANIC 'ACCEPTED (bug!)' 'proxy: create failed' 'create_object: FAILED'; do
         if marker_present "$bad" "$log"; then
             say "FAIL marker present: $bad"
             return 1
@@ -349,40 +378,77 @@ grade() {
     done
 
     tier=0
-    if marker_present '[kernel] abstraction layer initialized' "$log" \
-       && marker_present '[kernel] embedded init image:' "$log" \
-       && marker_present '[kernel] init entry point:' "$log" \
-       && marker_present 'ram_size known' "$log" \
-       && marker_present '[kernel] ACPI RSDP via EFI config table: found' "$log" \
-       && marker_present '[kernel] handing off to init' "$log"; then
+    if marker_present '[kernel] abstraction layer initialized' "$log" && \
+       marker_present '[kernel] embedded init image:' "$log" && \
+       marker_present '[kernel] init entry point:' "$log" && \
+       marker_present 'ram_size known' "$log" && \
+       marker_present '[kernel] ACPI RSDP via EFI config table: found' "$log" && \
+       marker_present '[kernel] handing off to init' "$log"; then
         tier=1
     fi
-    if [ "$tier" = "1" ] \
-       && marker_present 'stage 1: running on the single-syscall kernel_invoke model' "$log" \
-       && marker_present 'received 1 initial capabilities from the kernel' "$log" \
-       && marker_present 'mutex_manager handle' "$log" \
-       && marker_present 'memory_manager handle' "$log" \
-       && marker_present 'hardware mutex created, id' "$log" \
-       && marker_present 'cluster_scheduler handle' "$log"; then
+    if [ "$tier" = "1" ] && \
+       marker_present 'stage 1: running on the single-syscall kernel_invoke model' "$log" && \
+       marker_present 'received 1 initial capabilities from the kernel' "$log" && \
+       marker_present 'mutex_manager handle' "$log" && \
+       marker_present 'memory_manager handle' "$log" && \
+       marker_present 'hardware mutex created, id' "$log" && \
+       marker_present 'cluster_scheduler handle' "$log"; then
         tier=2
     fi
-    if [ "$tier" = "2" ] \
-       && marker_present 'malformed request rejected before dispatch' "$log"; then
+    if [ "$tier" = "2" ] && \
+       marker_present 'malformed request rejected before dispatch' "$log"; then
         tier=3
     fi
-    if [ "$tier" = "3" ] \
-       && marker_present "this core's own APIC ID:" "$log" \
-       && marker_present 'serial resource declared' "$log" \
-       && marker_present 'submitting jobs, then handing off to the scheduler' "$log"; then
+    if [ "$tier" = "3" ] && \
+       marker_present 'submitting jobs, then handing off to the scheduler' "$log"; then
         tier=4
     fi
 
+    t3a=FAIL
+    if [ "$tier" -ge 3 ] && marker_present 'node 0 joined' "$log"; then
+        t3a=PASS
+    fi
+
+    joins=$(grep -ac 'joined (node object' "$log" 2>/dev/null)
+    [ -z "$joins" ] && joins=0
+    apfails=$(grep -ac 'ACPI discovery failed' "$log" 2>/dev/null)
+    [ -z "$apfails" ] && apfails=0
+
+    t3b=NOT-RUN
+    if [ "$SMP_CPUS" -gt 1 ]; then
+        if [ "$apfails" -gt 0 ]; then
+            t3b=FAIL
+        elif [ "$joins" -gt 1 ]; then
+            t3b=PASS
+        else
+            t3b=FAIL
+        fi
+    fi
+
+    say "node joins observed: $joins (SMP_CPUS=$SMP_CPUS)"
+    say "AP ACPI discovery failures: $apfails"
     say "highest contiguous tier reached: T$tier"
-    if [ "$tier" -ge 3 ]; then
-        say "RESULT: PASS (T$tier)"
+    say "T3a (BSP scheduler up): $t3a"
+    say "T3b (SMP actually working): $t3b"
+
+    missing=""
+    [ "$tier" -lt 1 ] && missing="$missing T0"
+    [ "$tier" -lt 2 ] && missing="$missing T1"
+    [ "$tier" -lt 3 ] && missing="$missing T2"
+    [ "$t3a" != "PASS" ] && missing="$missing T3a"
+    [ "$t3b" != "PASS" ] && missing="$missing T3b"
+    if [ -n "$missing" ]; then
+        say "TESTS NOT PASSED:$missing"
+    fi
+    if [ "$SMP_CPUS" -le 1 ]; then
+        say "TESTS NOT RUN: T3b SMP path -- booted with SMP_CPUS=1, so no AP was ever started"
+    fi
+
+    if [ "$t3a" = "PASS" ] && [ "$t3b" = "PASS" ]; then
+        say "RESULT: PASS (T$tier, T3a and T3b)"
         return 0
     fi
-    say "RESULT: FAIL (T$tier -- need T3 or above)"
+    say "RESULT: FAIL (T3a=$t3a T3b=$t3b -- both required)"
     return 1
 }
 
@@ -391,6 +457,7 @@ grade() {
 # ---------------------------------------------------------------------------
 main() {
     mkdir -p "$WORK"
+    timeout_selftest
     fetch_deps
     resolve_and_report
     preflight
