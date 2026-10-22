@@ -147,6 +147,33 @@ int main(int argc, char **argv)
            "a grandchild inherits 1/1 from /soc, not 2/2 from the root");
     }
 
+    /* ---- own cells vs reg-sizing cells ---- */
+    {
+        /* The pair that is easy to conflate. /soc's own declaration sizes its
+         * CHILDREN's reg entries; /soc's own reg is sized by the root. */
+        int ac = -1, sc = -1;
+        ok(fdt_own_cell_counts(blob, soc, &ac, &sc) == 1 && ac == 1 && sc == 1,
+           "own cells for /soc report the 1/1 it declares for its children");
+
+        ac = -1; sc = -1;
+        ok(fdt_own_cell_counts(blob, root, &ac, &sc) == 1 && ac == 2 && sc == 2,
+           "own cells for the root report its 2/2");
+
+        /* A node with no declaration of its own must report not-found rather
+         * than inheriting -- that difference is how a caller detects a tree
+         * that is relying on inheritance where the spec wants a declaration. */
+        ac = -1; sc = -1;
+        ok(fdt_own_cell_counts(blob, serial, &ac, &sc) == 0,
+           "a node declaring neither reports not-found, not an inherited value");
+        ok(ac == -1 && sc == -1,
+           "not-found leaves the outputs untouched rather than zeroing them");
+
+        /* And the contrast, asserted directly so the pair cannot drift apart. */
+        ac = -1; sc = -1;
+        ok(fdt_cell_counts(blob, soc, &ac, &sc) == 1 && ac == 2 && sc == 2,
+           "fdt_cell_counts(/soc) reports the ROOT's 2/2, unlike own cells");
+    }
+
     /* ---- THE TRANSLATION: non-identity ranges ---- */
     ok(fdt_reg_to_addr(blob, serial, &r.base, &r.size) == 1,
        "reg translates for the UART");

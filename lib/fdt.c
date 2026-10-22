@@ -835,3 +835,33 @@ int fdt_reg_to_addr(const void *blob, int node_offset, uint64_t *out_base,
     }
     return 1;
 }
+
+
+int fdt_own_cell_counts(const void *blob, int node_offset, int *out_address_cells,
+                        int *out_size_cells)
+{
+    ctx_t c;
+    uint32_t v = 0;
+    int found = 0;
+
+    if (!ctx_init(blob, &c)) {
+        return 0;
+    }
+    /* Deliberately NOT walked up the chain: the whole point of this entry
+     * point is the node's own declaration. Returning an inherited value here
+     * would make it indistinguishable from fdt_cell_counts, and callers use
+     * the difference to detect a malformed tree. */
+    if (own_cells(&c, blob, node_offset, "#address-cells", &v) == 0) {
+        if (out_address_cells) {
+            *out_address_cells = (int)v;
+        }
+        found = 1;
+    }
+    if (own_cells(&c, blob, node_offset, "#size-cells", &v) == 0) {
+        if (out_size_cells) {
+            *out_size_cells = (int)v;
+        }
+        found = 1;
+    }
+    return found;
+}
