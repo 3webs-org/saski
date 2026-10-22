@@ -686,6 +686,11 @@ void kernel_boot_ap(uint64_t region_base)
         discovery[CORE_DISCOVERY_CLUSTER_SCHED_OFF / 8];
     boot_info.serial_resource_handle =
         discovery[CORE_DISCOVERY_SERIAL_RESOURCE_OFF / 8];
+    /* The AP has no boot_args of its own, so it cannot find the RSDP the
+     * way the BSP did (through the EFI configuration table). It is written
+     * into the discovery record by the BSP's init before the AP is started,
+     * for the same reason lapic_calibration_count is. */
+    boot_info.early_rsdp_phys = discovery[CORE_DISCOVERY_RSDP_OFF / 8];
     boot_info.own_mailbox_base = region_base + CORE_MAILBOX_OFFSET;
 
     kprintf("[kernel] AP handing off to its own init copy\n");
