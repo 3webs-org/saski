@@ -1,4 +1,4 @@
-#include "arch_x86_64.h"
+#include "arch.h"
 #include "cap.h"
 #include "capnp_validate.h"
 #include "serial.h"
