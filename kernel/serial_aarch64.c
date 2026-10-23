@@ -5,8 +5,9 @@
  * There is no port I/O on this architecture, so the x86 transport's outb/inb
  * do not apply; the UART is reached through normal memory accesses to its MMIO
  * window. The base address is the one QEMU's -machine virt uses (0x09000000),
- * which arch/qemu-virt.dts also declares -- the two are the same fact written
- * twice, and the device tree is the one that should win once discovery exists.
+ * which tests/qemu-virt.dts also declares. This fixed early-boot address
+ * is specific to QEMU virt; a platform's own device tree should win once
+ * discovery exists.
  *
  * PL011 needs no init for QEMU's default: firmware leaves it configured, and
  * the flags register's transmit-empty bit is all a polled transmitter needs. */

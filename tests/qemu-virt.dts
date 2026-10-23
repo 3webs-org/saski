@@ -1,37 +1,10 @@
 /* SPDX-License-Identifier: 0BSD */
 /*
- * The device tree this kernel is built with, as SOURCE. It is compiled to a
- * blob by dtc during the build and embedded directly into the kernel image
- * (see boot.S's own .incbin, the same mechanism the init image uses), so the
- * kernel carries its own description of the machine.
- *
- * WHY COMPILE IT IN RATHER THAN CARRY SOURCE AND PARSE AT BOOT. Parsing a
- * textual device-tree source needs a parser, a lexer and a string pool in the
- * kernel -- tens of kilobytes of code and, worse, working buffers. The blob
- * format is a flat, byte-addressable, zero-copy structure that fdt.c walks
- * directly out of read-only memory. On a target with 32 KiB of RAM the
- * difference is not an optimisation, it is the difference between fitting and
- * not: a compiled-in blob costs flash and no RAM at all, and every byte the
- * kernel does not have to allocate is a byte the scheduler can hand to work.
- *
- * It is also the config that travels with the image. A board is described by
- * the tree the kernel was built for; embedding it removes any possibility of
- * the running kernel and the machine it believes it is on disagreeing, which
- * is a class of bug that only ever shows up on somebody else's hardware.
- *
- * FIRMWARE MAY REPLACE IT. On the standard arm64 boot protocol the firmware
- * passes its own DTB in x0, and that one describes the ACTUAL machine, which
- * can legitimately differ from the build-time tree (extra memory, a board
- * revision, devices the build could not know about). So the embedded blob is
- * the fallback and the baseline, not a veto: init_boot_info.fdt_blob_phys
- * carries whatever the boot path discovered, and the embedded blob is used
- * when that is 0. Both paths go through the same fdt.c, so the reader never
- * has two behaviours to get wrong.
- *
- * This one describes QEMU's -machine virt, which is what the aarch64 boot path
- * is developed and tested against. It is deliberately a real tree rather than
- * a placeholder: the addresses below are the ones QEMU actually uses, so the
- * same tree exercises the reader against something concrete.
+ * QEMU virt test fixture. Compile this with dtc when exercising an explicit
+ * EMBEDDED=1 DTS_SOURCE=tests/qemu-virt.dts build; the production build
+ * never selects a test machine description by default. Firmware normally
+ * supplies the actual machine's DTB at boot. This fixture gives tests a
+ * concrete, predictable layout, including disabled devices.
  */
 
 /dts-v1/;

@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: 0BSD */
 /*
  * The device tree the FDT reader is tested against. It is deliberately NOT
- * arch/qemu-virt.dts: a test tree should contain the cases a real tree does
- * not readily show in a form that can be asserted on.
+ * tests/qemu-virt.dts: this parser fixture exercises cases the QEMU boot
+ * fixture does not readily show in a form that can be asserted on.
  *
  * Three things here exist because they are the ones DTB readers get wrong:
  *

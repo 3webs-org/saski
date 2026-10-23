@@ -63,9 +63,10 @@ fi
 # that matters -- an aarch64 target whose firmware does hand over a good DTB and
 # which therefore has no reason to spend flash on a copy.
 #
-# When EMBEDDED=1 on a device-tree platform, arch/qemu-virt.dts is compiled with
-# dtc and arch/dt_blob.S .incbin's the result into the image. When EMBEDDED=0 no
-# blob is built and no blob is linked, so the image contains only what it uses.
+# When EMBEDDED=1, DTS_SOURCE explicitly chooses the board's source tree;
+# dtc compiles it and arch/dt_blob.S .incbin's the result. The QEMU virt tree
+# lives under tests/ and is never selected implicitly for a real build.
+# When EMBEDDED=0 no blob is built or linked.
 #
 # Default 0, for every arch. That is what keeps this change invisible to the
 # existing build: with no flags set, the compile list and the link inputs are
@@ -168,9 +169,15 @@ fi
 # instruction set. See the axes block at the top.
 DROPIN=""
 if [ "$EMBEDDED" = "1" ]; then
+    [ -n "${DTS_SOURCE:-}" ] || { echo "build.sh: EMBEDDED=1 requires DTS_SOURCE (tests/qemu-virt.dts is a test fixture)" >&2; exit 1; }
+    case "$DTS_SOURCE" in
+        /*) ;;
+        *) DTS_SOURCE="$ROOT/$DTS_SOURCE" ;;
+    esac
+    [ -f "$DTS_SOURCE" ] || { echo "build.sh: no device-tree source at $DTS_SOURCE" >&2; exit 1; }
     DTC="${DTC:-dtc}"
-    "$DTC" -I dts -O dtb -o "$BUILD/saski.dtb" "$ROOT/arch/qemu-virt.dts" \
-        || { echo "build.sh: dtc failed on arch/qemu-virt.dts" >&2; exit 1; }
+    "$DTC" -I dts -O dtb -o "$BUILD/saski.dtb" "$DTS_SOURCE" \
+        || { echo "build.sh: dtc failed on $DTS_SOURCE" >&2; exit 1; }
     "$CC" -target $TARGET -c "$ROOT/arch/dt_blob.S" \
         -DDTB_PATH='"'"$BUILD/saski.dtb"'"' \
         -o "$BUILD/dt_blob.o"
