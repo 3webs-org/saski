@@ -25,6 +25,11 @@ DEPS_DIR="${DEPS_DIR:-$SASKI_BUILD/arm-deps}"
 WORK="${WORK:-$SASKI_BUILD/arm-judge}"
 BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-60}"
 FETCH_DEPS="${FETCH_DEPS:-1}"
+# GRUB's own xnu loader built for arm64-efi (otos-coreinit
+# tools/grub-xnu-arm64). When present, the judge ALSO boots
+# build/saski-xnu.macho through xnu_kernel64 with the x86_64 judge's
+# grub.cfg byte for byte -- the uniform-convention path. Absent: NOT RUN.
+XNU_MOD="${XNU_MOD:-$ROOT/../otos-coreinit/tools/grub-xnu-arm64/build/xnu.mod}"
 
 QEMU="${QEMU:-/nix/store/59hhc8zlvdlbcls7dkbhkhw9afwb6mps-qemu-11.1.2/bin/qemu-system-aarch64}"
 AAVMF_CODE="${AAVMF_CODE:-$DEPS_DIR/qemu-efi-aarch64/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd}"
@@ -149,14 +154,15 @@ boot' > "$WORK/grub.cfg"
 # STEP 3 -- boot and grade.
 # ---------------------------------------------------------------------------
 run_qemu() {
+    disk="${1:-$WORK/disk.img}"
     vars_copy="$WORK/vars.fd"
     cp "$AAVMF_VARS" "$vars_copy"
-    log="$WORK/boot.log"
+    log="$WORK/boot-$(basename "$disk" .img).log"
     rm -f "$log"
     "$QEMU" -machine virt -cpu cortex-a57 -m 512 -smp "${SMP_CPUS:-1}" \
         -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
         -drive if=pflash,format=raw,file="$vars_copy" \
-        -drive file="$WORK/disk.img",format=raw,if=virtio \
+        -drive file="$disk",format=raw,if=virtio \
         -display none -serial file:"$log" -monitor none -no-reboot \
         > /dev/null 2>&1 &
     qpid=$!
@@ -195,6 +201,43 @@ grade() {
     return 1
 }
 
+# The xnu_kernel64 path: same disk, plus xnu.mod and the Mach-O, and the
+# x86_64 judge's real-boot grub.cfg unchanged. Graded on the entry
+# contract the kernel can observe: it booted, and it recognised x0 as a v2
+# boot-parameter block. DTB discovery on this path goes through the EFI
+# system table the block carries; reported, not yet required.
+xnu_boot() {
+    [ -f "$XNU_MOD" ] || { say "xnu path: NOT RUN (no xnu.mod at $XNU_MOD)"; return 0; }
+    [ -f "$SASKI_BUILD/saski-xnu.macho" ] || fail "no $SASKI_BUILD/saski-xnu.macho -- rebuild with ARCH=aarch64"
+    xdisk="$WORK/disk-xnu.img"
+    cp "$WORK/disk.img" "$xdisk"
+    "$MTOOLS_BIN/mcopy" -o -i "$xdisk" "$XNU_MOD" ::/EFI/debian/arm64-efi/xnu.mod
+    "$MTOOLS_BIN/mcopy" -o -i "$xdisk" "$SASKI_BUILD/saski-xnu.macho" ::/saski.macho
+    printf '%s\n' 'set prefix=(hd0)/EFI/debian
+set root=(hd0)
+insmod xnu
+echo "[grubcfg] root is hd0 ; loading saski kernel: /saski.macho"
+xnu_kernel64 /saski.macho
+echo "[grubcfg] kernel loaded, booting"
+boot' > "$WORK/grub-xnu.cfg"
+    "$MTOOLS_BIN/mcopy" -o -i "$xdisk" "$WORK/grub-xnu.cfg" ::/EFI/debian/grub.cfg
+    say ""
+    say "=== booting under AAVMF + GRUB xnu_kernel64 ==="
+    xlog=$(run_qemu "$xdisk")
+    sed -n '4,20p' "$xlog"
+    if grep -qF '[kernel] aarch64 boot' "$xlog" && \
+       grep -qF 'x0 = xnu boot params v2' "$xlog"; then
+        if grep -qF 'DTB found via EFI configuration table' "$xlog"; then
+            say "xnu path: PASS (boot params v2 + DTB via EFI config table)"
+        else
+            say "xnu path: PASS (boot params v2); DTB via EFI config table: NOT YET (loader leaves efi_system_table unset)"
+        fi
+        return 0
+    fi
+    say "xnu path: FAIL"
+    return 1
+}
+
 main() {
     mkdir -p "$WORK"
     fetch_deps
@@ -204,10 +247,10 @@ main() {
     say "=== booting under AAVMF + GRUB (arm64-efi) ==="
     klog=$(run_qemu)
     cp "$klog" "$WORK/kernel-stage.log" 2>/dev/null || true
-    if grade "$klog"; then
-        exit 0
-    fi
-    exit 1
+    rc=0
+    grade "$klog" || rc=1
+    xnu_boot || rc=1
+    exit $rc
 }
 
 main "$@"

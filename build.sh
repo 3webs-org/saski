@@ -76,6 +76,17 @@ EMBEDDED="${EMBEDDED:-0}"
 
 CC="${CC:-clang-18}"
 LD64="${LD64:-ld64.lld}"
+# The aarch64 kernel's single link address, as an offset from QEMU virt's
+# RAM base (0x40000000). 16 MiB in: clear of the 1 MiB firmware-supplied
+# device tree AAVMF places at the bottom of RAM (GRUB's xnu loader allocates
+# the kernel's own range from EFI, so it must be free), and clear of the
+# reference init's declared vmaddr (otos-coreinit, 0x40200000). Every
+# aarch64 boot path -- QEMU -kernel (via the Image header's text_offset),
+# GRUB xnu_kernel64 (via the Mach-O vmaddr), the EFI stub (via its copy
+# destination) -- derives from this one value.
+AARCH64_RAM_BASE=0x40000000
+AARCH64_TEXT_OFFSET=0x1000000
+AARCH64_LOAD_BASE=$(printf '0x%x' $((AARCH64_RAM_BASE + AARCH64_TEXT_OFFSET)))
 if [ "$ARCH" = "aarch64" ]; then
     TARGET=aarch64-none-elf
 else
@@ -94,6 +105,7 @@ else
 fi
 if [ "$ARCH" = "aarch64" ]; then
     "$CC" -target $TARGET -c "$ROOT/arch/boot_aarch64.S" \
+        -DKERNEL_TEXT_OFFSET=$AARCH64_TEXT_OFFSET \
         -o "$BUILD/boot.o"
 else
 "$CC" -target $TARGET -c "$ROOT/kernel/boot.S" \
@@ -167,7 +179,7 @@ if [ "$ARCH" = "aarch64" ]; then
     # both.
     LDELFD="${LDELFD:-$(dirname "$LD64")/ld.lld}"
     [ -x "$LDELFD" ] || { echo "build.sh: no ld.lld next to $LD64; set LDELFD" >&2; exit 1; }
-    "$LDELFD" -e _start -Ttext 0x40080000 \
+    "$LDELFD" -e _start -Ttext $AARCH64_LOAD_BASE \
         -o "$BUILD/saski_raw.macho" \
         "$BUILD/boot.o" "$BUILD/kernel.o" "$BUILD/serial.o" "$BUILD/serial_fmt.o" \
         "$BUILD/cap.o" "$BUILD/capnp_validate.o" "$BUILD/macho.o" \
@@ -186,7 +198,13 @@ if [ "$ARCH" = "aarch64" ]; then
     # judge for this path.
     OBJCOPY="${OBJCOPY:-$(command -v llvm-objcopy || echo /nix/store/ak5yjnphlhn8lx51vinhx1wiyjxg1fsp-llvm-21.1.8/bin/llvm-objcopy)}"
     "$OBJCOPY" -O binary "$BUILD/saski.macho" "$BUILD/saski.bin"
-    python3 "$ROOT/tools/mkstub.py" "$BUILD/saski.bin" "$BUILD/saski.efi"
+    KERNEL_DST=$AARCH64_LOAD_BASE python3 "$ROOT/tools/mkstub.py" "$BUILD/saski.bin" "$BUILD/saski.efi"
+    # The same image as a Mach-O for GRUB's xnu_kernel64 -- the boot
+    # convention the x86_64 path uses, now available on arm64 through
+    # otos-coreinit's arm64 build of GRUB's own xnu loader. saski.macho
+    # stays the ELF (for -kernel); saski-xnu.macho is the xnu artifact.
+    python3 "$ROOT/tools/macho_arm64.py" "$BUILD/saski.bin" \
+        "$AARCH64_LOAD_BASE" "$BUILD/saski-xnu.macho"
 else
 "$LD64" -arch x86_64 -platform_version macos 10.12 10.12 \
     -e _start -pagezero_size 0x1000000 \

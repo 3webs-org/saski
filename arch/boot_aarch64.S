@@ -39,7 +39,28 @@ traded for a zero, which C code can report. Magic is checked first because
 .text
 .global _start
 _start:
-    /* x0 is the DTB. Store it before anything else can clobber it. */
+    /* The arm64 Image header (Documentation/arm64/booting.rst). It is what
+     * lets ONE link address serve every boot path: QEMU's -kernel honours
+     * text_offset when image_size is non-zero, so the flat image lands at
+     * its link address rather than QEMU's default ram_base + 0x80000;
+     * GRUB's xnu loader and the EFI stub place the image by its declared
+     * address and never read this header. code0 branches over the header,
+     * so entry at _start is the same instruction stream on every path. */
+    b    real_start               /* code0 */
+    .word 0                       /* code1 */
+    .quad KERNEL_TEXT_OFFSET      /* text_offset from the start of RAM */
+    .quad _end - _start           /* image_size: non-zero, so text_offset is honoured */
+    .quad 0xa                     /* flags: LE, 4K pages, place anywhere */
+    .quad 0, 0, 0                 /* res2..res4 */
+    .ascii "ARM\x64"             /* magic */
+    .word 0                       /* res5 */
+real_start:
+    /* x0 captured raw first: the DTB on the arm64 boot protocol, or a
+     * pointer to GRUB's xnu boot-parameter block on the xnu path. Which
+     * one it is gets decided in C (kernel_boot_aarch64), never assumed. */
+    ldr  x9, =g_boot_x0
+    str  x0, [x9]
+    /* x0 as a DTB. */
     /* ldr =sym rather than adrp/add: both should work, but ldr =sym is one
      * instruction and puts the address in a literal pool the linker fills,
      * which is easier to audit than a PC-relative pair whose correctness
@@ -86,6 +107,15 @@ fdt_ok:
     /* Stack. The linker places this image at its own vmaddr; the stack lives
      * at the end of the image's own data so it needs no separate allocation
      * and cannot collide with the blob, which sits wherever firmware put it. */
+    /* Zero .bss: every loader here copies file bytes only, so nothing
+     * else guarantees it. */
+    ldr  x9, =_edata
+    ldr  x10, =_end
+1:  cmp  x9, x10
+    b.hs 2f
+    strb wzr, [x9], #1
+    b    1b
+2:
     ldr  x9, =_stack_top
     mov  sp, x9
 
@@ -110,6 +140,10 @@ hang:
     .quad 0
 .global g_fdt_blob_size
  g_fdt_blob_size:
+    .quad 0
+/* The raw x0 at entry, whatever the loader meant by it. */
+.global g_boot_x0
+ g_boot_x0:
     .quad 0
 
 .align 4
