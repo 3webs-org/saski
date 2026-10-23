@@ -28,29 +28,47 @@ extern unsigned long long g_fdt_blob_size;
  * convention the x86_64 path boots by). */
 extern unsigned long long g_boot_x0;
 
-/* EFI_SYSTEM_TABLE (64-bit): NumberOfTableEntries at +96,
- * ConfigurationTable at +104; each entry is a 16-byte GUID then an 8-byte
- * VendorTable pointer. The FDT GUID is b1b621d5-f19c-41a5-830b-d9ea2ee3146c,
+/* EFI_SYSTEM_TABLE (64-bit): Hdr(24), FirmwareVendor@24, FirmwareRevision@32
+ * (+pad), ConsoleInHandle@40, ConIn@48, ConsoleOutHandle@56, ConOut@64,
+ * StandardErrorHandle@72, StdErr@80, RuntimeServices@88, BootServices@96,
+ * NumberOfTableEntries@104, ConfigurationTable@112; each entry is a 16-byte GUID then an 8-byte
+ * VendorTable pointer. The FDT GUID is b1b621d5-f19c-41a5-830b-d9152c69aae0,
  * read here as two little-endian quadwords. Called after ExitBootServices
  * with the MMU off: firmware never called SetVirtualAddressMap for us, so
  * these pointers are physical. */
 #define EFI_FDT_GUID_LO 0x41A5F19CB1B621D5ull
-#define EFI_FDT_GUID_HI 0x6C14E32EEAD90B83ull
+#define EFI_FDT_GUID_HI 0xE0AA692C15D90B83ull
+/* EFI_ACPI_20_TABLE_GUID 8868e871-e4f1-11d3-bc22-0080c73c8881. AAVMF on a
+ * standard (ACPI) platform publishes the RSDP here and deliberately hides
+ * the device tree; the DT is published only when ACPI is off. Both are the
+ * firmware's machine description: the kernel finds whichever exists and
+ * hands it on, it does not parse ACPI itself. */
+#define EFI_ACPI20_GUID_LO 0x11D3E4F18868E871ull
+#define EFI_ACPI20_GUID_HI 0x81883CC7800022BCull
 
-static uint64_t efi_find_fdt(uint64_t system_table)
+/* ACPI RSDP physical address, if the firmware described the machine with
+ * ACPI rather than a device tree. 0 = none. Handed to init the same way
+ * the x86_64 path hands early_rsdp_phys. */
+unsigned long long g_rsdp_phys;
+
+static uint64_t efi_find_table(uint64_t system_table, uint64_t guid_lo,
+                               uint64_t guid_hi)
 {
     if (system_table == 0) {
         return 0;
     }
     const uint8_t *st = (const uint8_t *)(uintptr_t)system_table;
-    uint64_t n = *(const uint64_t *)(st + 96);
-    const uint8_t *ct = (const uint8_t *)(uintptr_t)*(const uint64_t *)(st + 104);
+    uint64_t n = *(const uint64_t *)(st + 104);
+    const uint8_t *ct = (const uint8_t *)(uintptr_t)*(const uint64_t *)(st + 112);
     if (ct == 0 || n > 256) {
-        return 0; /* not a plausible configuration table */
+        kprintf("[kernel] EFI system table at 0x%X: implausible config table "
+                "(%u entries at 0x%X)\n", (unsigned)system_table, (unsigned)n,
+                (unsigned)(uintptr_t)ct);
+        return 0;
     }
     for (uint64_t i = 0; i < n; i++) {
         const uint64_t *e = (const uint64_t *)(ct + i * 24);
-        if (e[0] == EFI_FDT_GUID_LO && e[1] == EFI_FDT_GUID_HI) {
+        if (e[0] == guid_lo && e[1] == guid_hi) {
             return e[2];
         }
     }
@@ -79,10 +97,20 @@ static void resolve_xnu_boot_params(void)
         return;
     }
     kprintf("[kernel] x0 = xnu boot params v2 (GRUB xnu_kernel64)\n");
-    uint64_t fdt = efi_find_fdt(bp->efi_system_table);
+    uint64_t fdt = efi_find_table(bp->efi_system_table, EFI_FDT_GUID_LO,
+                                  EFI_FDT_GUID_HI);
     if (fdt == 0) {
-        kprintf("[kernel] xnu boot params carry no EFI system table with an "
-                "FDT (efi_system_table=0x%X)\n", (unsigned)bp->efi_system_table);
+        g_rsdp_phys = efi_find_table(bp->efi_system_table, EFI_ACPI20_GUID_LO,
+                                     EFI_ACPI20_GUID_HI);
+        if (g_rsdp_phys != 0) {
+            kprintf("[kernel] ACPI RSDP via EFI configuration table: 0x%X "
+                    "(firmware describes this machine with ACPI, not a DTB)\n",
+                    (unsigned)g_rsdp_phys);
+        } else {
+            kprintf("[kernel] EFI configuration table holds neither an FDT nor "
+                    "an ACPI RSDP (efi_system_table=0x%X)\n",
+                    (unsigned)bp->efi_system_table);
+        }
         return;
     }
     if (be32_at(fdt) != 0xd00dfeedu) {
@@ -104,7 +132,10 @@ void kernel_boot_aarch64(void)
 
 
 
-    if (g_fdt_blob_phys == 0) {
+    if (g_fdt_blob_phys == 0 && g_rsdp_phys != 0) {
+        kprintf("[kernel] machine description: ACPI (RSDP 0x%X), no DTB\n",
+                (unsigned)g_rsdp_phys);
+    } else if (g_fdt_blob_phys == 0) {
         kprintf("[kernel] no DTB: the boot stub found no valid device tree\n");
     } else {
         /* The stub already checked the magic; fdt_valid re-checks the block

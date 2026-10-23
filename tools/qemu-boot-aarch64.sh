@@ -159,7 +159,7 @@ run_qemu() {
     cp "$AAVMF_VARS" "$vars_copy"
     log="$WORK/boot-$(basename "$disk" .img).log"
     rm -f "$log"
-    "$QEMU" -machine virt -cpu cortex-a57 -m 512 -smp "${SMP_CPUS:-1}" \
+    "$QEMU" -machine "virt${QEMU_MACHINE_OPTS:-}" -cpu cortex-a57 -m 512 -smp "${SMP_CPUS:-1}" \
         -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
         -drive if=pflash,format=raw,file="$vars_copy" \
         -drive file="$disk",format=raw,if=virtio \
@@ -221,21 +221,28 @@ xnu_kernel64 /saski.macho
 echo "[grubcfg] kernel loaded, booting"
 boot' > "$WORK/grub-xnu.cfg"
     "$MTOOLS_BIN/mcopy" -o -i "$xdisk" "$WORK/grub-xnu.cfg" ::/EFI/debian/grub.cfg
-    say ""
-    say "=== booting under AAVMF + GRUB xnu_kernel64 ==="
-    xlog=$(run_qemu "$xdisk")
-    sed -n '4,20p' "$xlog"
-    if grep -qF '[kernel] aarch64 boot' "$xlog" && \
-       grep -qF 'x0 = xnu boot params v2' "$xlog"; then
-        if grep -qF 'DTB found via EFI configuration table' "$xlog"; then
-            say "xnu path: PASS (boot params v2 + DTB via EFI config table)"
+    # Two firmware personalities, both standard: AAVMF publishes ACPI and
+    # hides the DT by default, and publishes the DT when ACPI is off. The
+    # kernel must find the machine description either way.
+    rc=0
+    for mode in acpi dt; do
+        if [ "$mode" = dt ]; then QEMU_MACHINE_OPTS=",acpi=off"; want='DTB found via EFI configuration table'
+        else QEMU_MACHINE_OPTS=""; want='ACPI RSDP via EFI configuration table'; fi
+        say ""
+        say "=== booting under AAVMF ($mode) + GRUB xnu_kernel64 ==="
+        xlog=$(QEMU_MACHINE_OPTS="$QEMU_MACHINE_OPTS" run_qemu "$xdisk")
+        cp "$xlog" "$WORK/boot-xnu-$mode.log"
+        sed -n '4,20p' "$xlog"
+        if grep -qF '[kernel] aarch64 boot' "$xlog" && \
+           grep -qF 'x0 = xnu boot params v2' "$xlog" && \
+           grep -qF "$want" "$xlog"; then
+            say "xnu path ($mode): PASS (boot params v2 + $want)"
         else
-            say "xnu path: PASS (boot params v2); DTB via EFI config table: NOT YET (loader leaves efi_system_table unset)"
+            say "xnu path ($mode): FAIL (wanted: $want)"
+            rc=1
         fi
-        return 0
-    fi
-    say "xnu path: FAIL"
-    return 1
+    done
+    return $rc
 }
 
 main() {
