@@ -270,9 +270,19 @@ preflight() {
 
     SMP_HDR="$ROOT/include/smp_layout.h"
     [ -f "$SMP_HDR" ] || fail "no $SMP_HDR"
-    WANT_KERNEL=$(sed -n 's/^#define[[:space:]]*KERNEL_LOAD_BASE[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p' "$SMP_HDR" | head -1)
-    WANT_COREINIT=$(sed -n 's/^#define[[:space:]]*BSP_COREINIT_LOAD_BASE[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p' "$SMP_HDR" | head -1)
+    # The header declares both architectures' values under #if. Raw sed
+    # finds ARM's first, even on x86. Ask the x86 preprocessor which branch
+    # is active, then strip the C integer suffix before numeric comparison.
+    CPP_CC="$CC"
+    if [ -z "$CPP_CC" ]; then
+        CPP_CC=$(xcrun -f clang 2>/dev/null) || CPP_CC=clang
+    fi
+    SMP_DEFINES=$(printf '#include "smp_layout.h"\n' | "$CPP_CC" -target x86_64-apple-darwin -E -dM -x c -I"$ROOT/include" -) \
+        || fail "could not preprocess $SMP_HDR for x86_64 with $CPP_CC"
+    WANT_KERNEL=$(printf '%s\n' "$SMP_DEFINES" | sed -n 's/^#define[[:space:]]*KERNEL_LOAD_BASE[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p')
+    WANT_COREINIT=$(printf '%s\n' "$SMP_DEFINES" | sed -n 's/^#define[[:space:]]*BSP_INIT_LOAD_BASE[[:space:]]*\(0x[0-9a-fA-F]*\).*/\1/p')
     [ -n "$WANT_KERNEL" ] || fail "could not parse KERNEL_LOAD_BASE from $SMP_HDR"
+    [ -n "$WANT_COREINIT" ] || fail "could not parse BSP_INIT_LOAD_BASE from $SMP_HDR"
 
     GOT_KERNEL=$(otool -l "$KERNEL" | awk '/segname __TEXT/{f=1} f&&/vmaddr/{print $2; exit}')
     [ -n "$GOT_KERNEL" ] || fail "could not read __TEXT vmaddr from $KERNEL"
@@ -281,11 +291,11 @@ preflight() {
         || fail "kernel __TEXT vmaddr $GOT_KERNEL != KERNEL_LOAD_BASE $WANT_KERNEL"
 
     COREINIT_IMG="$COREINIT_ROOT/build/coreinit.macho"
-    if [ -f "$COREINIT_IMG" ] && [ -n "$WANT_COREINIT" ]; then
+    if [ -f "$COREINIT_IMG" ]; then
         GOT_CI=$(otool -l "$COREINIT_IMG" | awk '/segname __TEXT/{f=1} f&&/vmaddr/{print $2; exit}')
-        say "coreinit __TEXT vmaddr = $GOT_CI (smp_layout.h BSP_COREINIT_LOAD_BASE = $WANT_COREINIT)"
+        say "coreinit __TEXT vmaddr = $GOT_CI (smp_layout.h BSP_INIT_LOAD_BASE = $WANT_COREINIT)"
         [ "$(normalize_hex "$GOT_CI")" = "$(normalize_hex "$WANT_COREINIT")" ] \
-            || fail "coreinit __TEXT vmaddr $GOT_CI != BSP_COREINIT_LOAD_BASE $WANT_COREINIT"
+            || fail "coreinit __TEXT vmaddr $GOT_CI != BSP_INIT_LOAD_BASE $WANT_COREINIT"
     else
         say "coreinit image absent at $COREINIT_IMG -- skipping that assertion (not a failure)"
     fi
@@ -425,7 +435,7 @@ grade() {
     log="$1"
     say ""
     say "=== GRUB stage ==="
-    sed -n '1,20p' "$log"
+    LC_ALL=C sed -n '1,20p' "$log"
     say ""
     say "=== kernel stage (last 40 lines) ==="
     tail -40 "$log"
@@ -491,8 +501,9 @@ grade() {
     # with the init file actually on disk. A mismatch means the run judged a
     # kernel built against an older init, and any conclusion about init
     # behaviour would be about code that is not in the tree.
-    emb=$(sed -n 's/.*embedded init image: \([0-9][0-9]*\) bytes.*/\1/p' "$log" | head -1)
-    if [ -n "$emb" ] && [ -n "$INIT_BYTES" ]; then
+    emb=$(LC_ALL=C sed -n 's/.*embedded init image: \([0-9][0-9]*\) bytes.*/\1/p' "$log" | head -1)
+    if [ -n "$INIT_BYTES" ]; then
+        [ -n "$emb" ] || { say "FAIL: kernel did not report the embedded init length"; return 1; }
         say "embedded init: kernel reports $emb bytes, disk has $INIT_BYTES bytes"
         if [ "$emb" != "$INIT_BYTES" ]; then
             say "FAIL: the embedded init does not match the init on disk -- this run judged a stale init"
