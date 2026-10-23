@@ -209,12 +209,14 @@ grade() {
     if [ "$tier" = "5" ] && \
        grep -qF '[coreinit] === job: timer bring-up ===' "$log" && \
        grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$log"; then tier=6; fi
+    if [ "$tier" = "6" ] && \
+       grep -qF 'cross_core_signal: self-test PASS' "$log"; then tier=7; fi
     say "highest tier reached: T$tier"
-    if [ "$tier" -ge 6 ]; then
-        say "RESULT: PASS (T6: DTB + init handoff + scheduled coreinit jobs)"
+    if [ "$tier" -ge 7 ]; then
+        say "RESULT: PASS (T7: DTB + init handoff + scheduled jobs + self-IPI)"
         return 0
     fi
-    say "RESULT: FAIL (highest partial tier T$tier; scheduled coreinit jobs not observed)"
+    say "RESULT: FAIL (highest partial tier T$tier; self-IPI not proven)"
     return 1
 }
 
@@ -260,10 +262,11 @@ boot' > "$WORK/grub-xnu.cfg"
            grep -qF '[kernel] factory: created handle' "$xlog" && \
            grep -qF '[coreinit] stage 1:' "$xlog" && \
            grep -qF '[coreinit] === job: timer bring-up ===' "$xlog" && \
-           grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$xlog"; then
-            say "xnu path ($mode): PASS (boot params v2 + $want + scheduled coreinit jobs)"
+           grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$xlog" && \
+           grep -qF 'cross_core_signal: self-test PASS' "$xlog"; then
+            say "xnu path ($mode): PASS (boot params v2 + $want + self-IPI)"
         else
-            say "xnu path ($mode): FAIL (wanted: $want and scheduled coreinit jobs)"
+            say "xnu path ($mode): FAIL (wanted: $want and self-IPI PASS)"
             rc=1
         fi
     done
