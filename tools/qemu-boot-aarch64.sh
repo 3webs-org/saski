@@ -21,7 +21,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SASKI_BUILD="${SASKI_BUILD:-$ROOT/build}"
 DEPS_DIR="${DEPS_DIR:-$SASKI_BUILD/arm-deps}"
 WORK="${WORK:-$SASKI_BUILD/arm-judge}"
-BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-60}"
+# Multi-core GICv3 under TCG can need longer before every node's timer
+# milestone appears. A caller-supplied BOOT_TIMEOUT_S overrides both defaults.
+BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-}"
+SMP_CPUS="${SMP_CPUS:-1}"
 FETCH_DEPS="${FETCH_DEPS:-1}"
 COREINIT_ROOT="${COREINIT_ROOT:-$ROOT/../otos-coreinit}"
 # Default matrix gates both QEMU virt interrupt controllers. GIC_VERSION=3
@@ -164,20 +167,52 @@ run_qemu() {
     disk="${1:-$WORK/disk.img}"
     vars_copy="$WORK/vars.fd"
     cp "$AAVMF_VARS" "$vars_copy"
-    log="$WORK/boot-$(basename "$disk" .img)-gic${GIC_VERSION}-${2:-stub}.log"
-    rm -f "$log"
-    "$QEMU" -machine "virt,gic-version=${GIC_VERSION}${QEMU_MACHINE_OPTS:-}" -cpu cortex-a57 -m 512 -smp "${SMP_CPUS:-1}" \
+    tag="$(basename "$disk" .img)-gic${GIC_VERSION}-${2:-stub}"
+    log="$WORK/boot-$tag.log"
+    qmp_socket="$WORK/qmp-$tag.sock"
+    probe="${log%.log}.ap-timers"
+    rm -f "$log" "$probe" "$qmp_socket"
+    if [ "$SMP_CPUS" -gt 1 ]; then
+        ap_addresses=$(python3 "$ROOT/tools/arm-ap-probe.py" addresses \
+            "$SNAPSHOT" "$ROOT/include/smp_layout.h" "$SMP_CPUS") || return 1
+    fi
+    "$QEMU" -machine "virt,gic-version=${GIC_VERSION}${QEMU_MACHINE_OPTS:-}" -cpu cortex-a57 -m 512 -smp "$SMP_CPUS" \
         -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
         -drive if=pflash,format=raw,file="$vars_copy" \
         -drive file="$disk",format=raw,if=virtio \
-        -display none -serial file:"$log" -monitor none -no-reboot \
+        -display none -serial file:"$log" -monitor none \
+        -qmp "unix:$qmp_socket,server,nowait" -no-reboot \
         > /dev/null 2>&1 &
     qpid=$!
+    timeout_s="${BOOT_TIMEOUT_S:-60}"
+    if [ "$SMP_CPUS" -gt 1 ]; then
+        timeout_s="${BOOT_TIMEOUT_S:-100}"
+        if [ "$GIC_VERSION" = 3 ]; then
+            timeout_s="${BOOT_TIMEOUT_S:-120}"
+        fi
+    fi
     waited=0
-    while [ "$waited" -lt "$BOOT_TIMEOUT_S" ]; do
+    stable=0
+    while [ "$waited" -lt "$timeout_s" ]; do
         kill -0 "$qpid" 2>/dev/null || break
         sleep 1
         waited=$((waited + 1))
+        # QMP physical reads briefly stop TCG vCPUs. Let the guest boot
+        # without probes first, then sample at most once per ten seconds.
+        # Once all cores have 500 IRQ-object invocations, watch five more
+        # seconds for delayed faults before ending this finite boot test.
+        if [ "$SMP_CPUS" -gt 1 ] && [ -s "$probe" ]; then
+            stable=$((stable + 1))
+            [ "$stable" -lt 5 ] || break
+        elif [ "$SMP_CPUS" -gt 1 ] && [ "$waited" -ge 30 ] && \
+             [ $((waited % 10)) -eq 0 ] && [ -S "$qmp_socket" ]; then
+            if python3 "$ROOT/tools/arm-ap-probe.py" sample "$qmp_socket" \
+                "$ap_addresses" >"$probe.tmp" 2>"$probe.err"; then
+                mv "$probe.tmp" "$probe"
+            else
+                rm -f "$probe.tmp"
+            fi
+        fi
     done
     kill "$qpid" 2>/dev/null || true
     sleep 1
@@ -195,7 +230,9 @@ grade() {
     say "=== kernel stage ==="
     tail -20 "$log"
     say ""
-    if grep -qF 'Synchronous Exception at' "$log" || grep -qF '[kernel] PANIC' "$log"; then
+    if grep -qF 'Synchronous Exception at' "$log" ||
+       grep -qF 'UNHANDLED ARM exception' "$log" ||
+       grep -qF '[kernel] PANIC' "$log"; then
         say "RESULT: FAIL (unhandled exception or kernel panic after boot)"
         return 1
     fi
@@ -207,17 +244,26 @@ grade() {
        grep -qF '[kernel] handing off to init' "$log" && \
        grep -qF '[kernel] factory: created handle' "$log"; then tier=4; fi
     if [ "$tier" = "4" ] && grep -qF '[coreinit] stage 1:' "$log"; then tier=5; fi
+    # The BSP resource-demo line may interleave with APs' early unguarded
+    # serial writes. In SMP mode per-core timer milestones below are the
+    # stronger evidence that scheduled work actually ran on every node.
     if [ "$tier" = "5" ] && \
        grep -qF '[coreinit] === job: timer bring-up ===' "$log" && \
-       grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$log"; then tier=6; fi
+       { [ "$SMP_CPUS" -gt 1 ] ||
+         grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$log"; }; then tier=6; fi
     if [ "$tier" = "6" ] && \
        grep -qF 'cross_core_signal: self-test PASS' "$log"; then tier=7; fi
+    required_tier=7
+    if [ "$SMP_CPUS" -gt 1 ]; then
+        required_tier=8
+        if [ "$tier" = "7" ] && [ -s "${log%.log}.ap-timers" ]; then tier=8; fi
+    fi
     say "highest tier reached: T$tier"
-    if [ "$tier" -ge 7 ]; then
-        say "RESULT: PASS (T7: DTB + init handoff + scheduled jobs + self-IPI)"
+    if [ "$tier" -ge "$required_tier" ]; then
+        say "RESULT: PASS (T$tier: init handoff, self-IPI, $SMP_CPUS core(s) serving jobs)"
         return 0
     fi
-    say "RESULT: FAIL (highest partial tier T$tier; self-IPI not proven)"
+    say "RESULT: FAIL (highest partial tier T$tier; T$required_tier required)"
     return 1
 }
 
@@ -254,6 +300,7 @@ boot' > "$WORK/grub-xnu.cfg"
         cp "$xlog" "$WORK/boot-xnu-$mode-gic$GIC_VERSION.log"
         sed -n '4,20p' "$xlog"
         if ! grep -qF 'Synchronous Exception at' "$xlog" && \
+           ! grep -qF 'UNHANDLED ARM exception' "$xlog" && \
            ! grep -qF '[kernel] PANIC' "$xlog" && \
            grep -qF '[kernel] aarch64 boot' "$xlog" && \
            grep -qF 'x0 = xnu boot params v2' "$xlog" && \
@@ -263,11 +310,13 @@ boot' > "$WORK/grub-xnu.cfg"
            grep -qF '[kernel] factory: created handle' "$xlog" && \
            grep -qF '[coreinit] stage 1:' "$xlog" && \
            grep -qF '[coreinit] === job: timer bring-up ===' "$xlog" && \
-           grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$xlog" && \
-           grep -qF 'cross_core_signal: self-test PASS' "$xlog"; then
-            say "xnu path ($mode, GICv$GIC_VERSION): PASS (boot params v2 + $want + self-IPI)"
+           { [ "$SMP_CPUS" -gt 1 ] ||
+             grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$xlog"; } && \
+           grep -qF 'cross_core_signal: self-test PASS' "$xlog" && \
+           { [ "$SMP_CPUS" -le 1 ] || [ -s "${xlog%.log}.ap-timers" ]; }; then
+            say "xnu path ($mode, GICv$GIC_VERSION): PASS ($SMP_CPUS core(s), $want, self-IPI)"
         else
-            say "xnu path ($mode, GICv$GIC_VERSION): FAIL (wanted: $want and self-IPI PASS)"
+            say "xnu path ($mode, GICv$GIC_VERSION): FAIL (wanted: $want, self-IPI and $SMP_CPUS core(s))"
             xnu_rc=1
         fi
     done
