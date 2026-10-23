@@ -106,6 +106,7 @@ fi
 if [ "$ARCH" = "aarch64" ]; then
     "$CC" -target $TARGET -c "$ROOT/arch/boot_aarch64.S" \
         -DKERNEL_TEXT_OFFSET=$AARCH64_TEXT_OFFSET \
+        -DINIT_MACHO_PATH='"'"$INIT_MACHO"'"' \
         -o "$BUILD/boot.o"
 else
 "$CC" -target $TARGET -c "$ROOT/kernel/boot.S" \

@@ -192,9 +192,13 @@ grade() {
     if grep -qF '[kernel] aarch64 boot' "$log"; then tier=1; fi
     if [ "$tier" = "1" ] && grep -qF 'DTB at 0x' "$log" && grep -qF 'valid' "$log"; then tier=2; fi
     if [ "$tier" = "2" ] && grep -qF 'memory: base' "$log"; then tier=3; fi
+    if [ "$tier" = "3" ] && grep -qF '[kernel] embedded init image:' "$log" && \
+       grep -qF '[kernel] handing off to init' "$log" && \
+       grep -qF '[kernel] factory: created handle' "$log"; then tier=4; fi
+    if [ "$tier" = "4" ] && grep -qF '[coreinit] stage 1:' "$log"; then tier=5; fi
     say "highest tier reached: T$tier"
-    if [ "$tier" = "3" ]; then
-        say "RESULT: PASS (T3: boot + DTB valid + memory ranges parsed)"
+    if [ "$tier" -ge 4 ]; then
+        say "RESULT: PASS (T$tier: DTB + init Mach-O handoff + capability dispatch)"
         return 0
     fi
     say "RESULT: FAIL"
@@ -235,8 +239,11 @@ boot' > "$WORK/grub-xnu.cfg"
         sed -n '4,20p' "$xlog"
         if grep -qF '[kernel] aarch64 boot' "$xlog" && \
            grep -qF 'x0 = xnu boot params v2' "$xlog" && \
-           grep -qF "$want" "$xlog"; then
-            say "xnu path ($mode): PASS (boot params v2 + $want)"
+           grep -qF "$want" "$xlog" && \
+           grep -qF '[kernel] embedded init image:' "$xlog" && \
+           grep -qF '[kernel] handing off to init' "$xlog" && \
+           grep -qF '[kernel] factory: created handle' "$xlog"; then
+            say "xnu path ($mode): PASS (boot params v2 + $want + init handoff)"
         else
             say "xnu path ($mode): FAIL (wanted: $want)"
             rc=1

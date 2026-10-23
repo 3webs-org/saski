@@ -1,23 +1,20 @@
 #include "arch.h"
+#include "cap.h"
+#include "macho.h"
+#include "../include/init_abi.h"
 #include "serial.h"
 #include "fdt.h"
 #include "xnu_boot_args.h"
 #include <stdint.h>
 
-/* The aarch64 kernel's own boot path.
- *
- * Deliberately NOT a copy of kernel_boot: that function is built around the
- * xnu boot_args structure and ACPI discovery, neither of which exists on this
- * architecture. What an aarch64 boot actually has is the device tree, whose
- * address boot_aarch64.S captured from x0 and validated before C ran.
- *
- * Scope, stated plainly: this is the bring-up path, not a finished port. It
- * initialises the console, validates and reports the device tree, and halts.
- * Everything the x86 path does after its own console init -- capability
- * bootstrap, macho_load of the embedded init, the handoff -- is future work
- * gated on the aarch64 coreinit backend, which does not exist yet. Saying so
- * here rather than implying otherwise by silence: the serial output this
- * produces is the proof that the boot path works, and it stops there. */
+/* aarch64 enters from a DTB (arm64 Image protocol) or XNU v2 boot args
+ * (GRUB xnu_kernel64). Both feed the same init_boot_info and the same
+ * build-selected Mach-O init; the kernel only supplies IPC and hands off. */
+
+extern uint8_t g_embedded_init_start[];
+extern uint8_t g_embedded_init_end[];
+extern uint8_t _start[];
+typedef void (*init_entry_t)(struct init_boot_info *);
 
 /* Provided by arch/boot_aarch64.S: the DTB address captured from x0, and its
  * size, both zeroed by the stub if the blob failed validation. */
@@ -131,7 +128,6 @@ void kernel_boot_aarch64(void)
     resolve_xnu_boot_params();
 
 
-
     if (g_fdt_blob_phys == 0 && g_rsdp_phys != 0) {
         kprintf("[kernel] machine description: ACPI (RSDP 0x%X), no DTB\n",
                 (unsigned)g_rsdp_phys);
@@ -166,6 +162,52 @@ void kernel_boot_aarch64(void)
         }
     }
 
-    kprintf("[kernel] aarch64 bring-up complete; halting\n");
+    const uint64_t init_len = (uint64_t)(g_embedded_init_end - g_embedded_init_start);
+    kprintf("[kernel] embedded init image: %u bytes\n", (unsigned)init_len);
+    uint64_t entry = macho_load(g_embedded_init_start, 0);
+    if (entry == 0) {
+        kprintf("[kernel] PANIC: failed to Mach-O-load init\n");
+        halt_forever();
+    }
+    kprintf("[kernel] init entry point: 0x%X\n", (unsigned)entry);
+
+    static struct init_boot_info boot_info;
+    boot_info.caps = kernel_cap_bootstrap();
+    boot_info.kernel_invoke = kernel_invoke;
+    boot_info.kernel_load_base = (uint64_t)(uintptr_t)&_start;
+    /* AP entry and page tables do not exist yet on aarch64. Leave the
+     * image pair absent so init does not try to start a copied kernel. */
+    boot_info.kernel_boot_ap_addr = 0;
+    boot_info.pml4_phys = 0;
+    boot_info.init_image_addr = (uint64_t)(uintptr_t)g_embedded_init_start;
+    boot_info.init_image_len = init_len;
+    boot_info.kernel_image_addr = 0;
+    boot_info.kernel_image_len = 0;
+    boot_info.early_rsdp_phys = g_rsdp_phys;
+    boot_info.fdt_blob_phys = g_fdt_blob_phys;
+    if (g_boot_x0 != 0 && g_fdt_blob_phys == 0) {
+        const struct xnu_boot_args_v2 *bp =
+            (const struct xnu_boot_args_v2 *)(uintptr_t)g_boot_x0;
+        if (bp->vermajor == 2) {
+            boot_info.ram_size = bp->ram_size;
+        }
+    }
+    if (boot_info.ram_size == 0 && g_fdt_blob_phys != 0 &&
+        fdt_valid((const void *)(uintptr_t)g_fdt_blob_phys, g_fdt_blob_size)) {
+        fdt_range_t ranges[8];
+        size_t count = fdt_memory_ranges((const void *)(uintptr_t)g_fdt_blob_phys,
+                                         ranges, 8);
+        for (size_t i = 0; i < count; i++) {
+            boot_info.ram_size += ranges[i].size;
+        }
+    }
+
+    kprintf("[kernel] init boot info: fdt 0x%X, rsdp 0x%X, ram %u MiB\n",
+            (unsigned)boot_info.fdt_blob_phys,
+            (unsigned)boot_info.early_rsdp_phys,
+            (unsigned)(boot_info.ram_size / (1024 * 1024)));
+    kprintf("[kernel] handing off to init -- kernel does not run again after this\n");
+    ((init_entry_t)(uintptr_t)entry)(&boot_info);
+    kprintf("[kernel] PANIC: init returned\n");
     halt_forever();
 }

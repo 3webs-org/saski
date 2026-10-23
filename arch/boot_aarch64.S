@@ -151,3 +151,13 @@ stack_bottom:
     .space 65536
 .global _stack_top
 _stack_top:
+
+/* The same build-selected init Mach-O embedded by the x86_64 boot.S.
+ * No bootloader module list is needed on either architecture. */
+.section .rodata
+.balign 16
+.global g_embedded_init_start
+g_embedded_init_start:
+.incbin INIT_MACHO_PATH
+.global g_embedded_init_end
+g_embedded_init_end:
