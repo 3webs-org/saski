@@ -130,6 +130,20 @@ hang:
     wfi
     b hang
 
+/* PSCI CPU_ON starts a secondary core at this entry in a byte-for-byte
+ * copy of the BSP kernel image. x0 is the assigned region_base, not a DTB.
+ * Only PC-relative instructions may execute here: the copy lives at a
+ * different physical address from the BSP image linked at 0x41000000.
+ * CORE_STACK_OFFSET + CORE_STACK_SIZE = 0x380000 (asserted in C). */
+.global kernel_boot_ap
+kernel_boot_ap:
+    add x9, x0, #0x380, lsl #12
+    mov sp, x9
+    bl kernel_boot_ap_aarch64
+ap_hang:
+    wfi
+    b ap_hang
+
 .data
 .align 3
 /* Physical address of the DTB, as delivered in x0. Zero means "none" or

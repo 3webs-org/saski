@@ -91,24 +91,13 @@ static void cap_unlock(void)
 #define FACTORY_METHOD_CREATE 0
 #define FACTORY_METHOD_DESTROY 1
 
-/* The factory's schema, as fully compile-time-constant data.
- *
- * This used to be built at runtime by init_factory_schema(), because a static
- * initialiser holding another object's address bakes in an absolute value
- * valid only for one load address, and a second kernel instance on another
- * core loads elsewhere. The conclusion drawn then -- that runtime construction
- * was the only way out -- was wrong. The actual requirement is that the
- * initialiser contain nothing needing relocation, and INDICES satisfy that
- * where pointers do not.
- *
- * So every reference below is an index into g_factory_table. Integers are
- * arithmetic, not addresses; the whole tree is const, sits in read-only data,
- * is identical for every kernel instance, costs no per-instance RAM and needs
- * nothing constructed before first use. On a target with 32 KiB of RAM that is
- * the point: a schema costs flash, not RAM.
- *
- * Layout is load-bearing: struct indices are positional in g_factory_structs,
- * and each method names its param and result schema by index. */
+/* The factory's schema arrays are compile-time constants. References
+ * between schema entries are indices, so these arrays need no relocation
+ * when an AP executes a copied kernel image. The schema_table_t descriptor
+ * itself contains pointers: those MUST be set to this copy's local arrays
+ * by kernel_cap_bootstrap, never copied as link-time absolute addresses
+ * pointing back into the BSP. Only the descriptor costs per-instance RAM.
+ * Layout is load-bearing: method schemas name struct indices in the table. */
 static const struct_schema_t g_factory_structs[] = {
     /* 0: CREATE request -- CAP_CREATE_REQUEST_WORDS data words, no pointer
      * fields. The word count lives in cap.h so the consumer repo reads the
@@ -139,6 +128,9 @@ static const object_schema_t g_factory_objects[] = {
     {.first_method = 0, .method_count = 2},
 };
 
+#if defined(__aarch64__)
+static schema_table_t g_factory_table;
+#else
 static const schema_table_t g_factory_table = {
     .structs = g_factory_structs,
     .struct_count = 3,
@@ -149,6 +141,7 @@ static const schema_table_t g_factory_table = {
     .objects = g_factory_objects,
     .object_count = 1,
 };
+#endif
 
 /* The factory object's schema handle: index 0 in the table above, a plain
  * integer so it too is compile-time constant. */
@@ -258,6 +251,20 @@ static void factory_handler(void *data, uint32_t method_id,
 
 initial_capabilities_t kernel_cap_bootstrap(void)
 {
+#if defined(__aarch64__)
+    /* An AP's image is copied byte-for-byte from the BSP. Rebind pointers
+     * to the const arrays in THIS copy before exposing the factory. */
+    g_cap_lock = 0;
+    g_factory_table.structs = g_factory_structs;
+    g_factory_table.struct_count = 3;
+    g_factory_table.pointers = g_factory_pointers;
+    g_factory_table.pointer_count = 0;
+    g_factory_table.methods = g_factory_methods;
+    g_factory_table.method_count = 2;
+    g_factory_table.objects = g_factory_objects;
+    g_factory_table.object_count = 1;
+#endif
+
     g_factory_record.magic = CAP_RECORD_MAGIC;
     g_factory_record.valid = 1;
     g_factory_record.handler = factory_handler;

@@ -107,7 +107,12 @@ fi
 # floating-point unit being enabled: firmware may leave it off, and touching
 # an FP register with it off is an exception with no handler.
 if [ "$ARCH" = "aarch64" ]; then
-    CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -mgeneral-regs-only -Wall -Wextra -I$ROOT/kernel -I$ROOT/include -O1 -g"
+    # APs run a raw copy at an assigned address. On this AArch64 ELF target,
+    # -fno-pic uses PC-relative ADRP/ADD references to local symbols.
+    # -fpie instead emits GOT slots containing absolute BSP addresses; a raw
+    # AP copy has no dyld to rebase those slots. The BSP assembly entry can
+    # still use absolute literals because APs enter kernel_boot_ap directly.
+    CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -fno-pic -mgeneral-regs-only -Wall -Wextra -I$ROOT/kernel -I$ROOT/include -O1 -g"
 else
     CFLAGS="-target $TARGET -std=c11 -ffreestanding -fno-stack-protector -fpie -mno-red-zone -mno-sse -mno-mmx -Wall -Wextra -I$ROOT/kernel -I$ROOT/include -O1 -g"
 fi

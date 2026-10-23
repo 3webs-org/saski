@@ -3,25 +3,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Object schemas are COMPILE-TIME CONSTANT DATA.
+/* Object schema arrays are COMPILE-TIME CONSTANT DATA.
  *
- * The obvious way to write these is with pointers: a struct_schema_t holding
- * `const pointer_schema_t *pointers`, a method_schema_t holding
- * `const struct_schema_t *param_schema`. That is what this file used to do, and
- * it forced the kernel to populate its own factory schema at runtime (see
- * cap.c) because a static initialiser containing an absolute address bakes in
- * a value correct only for one exact load address. This kernel is PIE and a
- * second instance runs at a different physical address on every additional
- * core, and neither of this project's own from-scratch loaders processes
- * relocation tables -- so a baked absolute address would be silently wrong.
- *
- * The fix is not to keep building schemas at boot. It is to stop needing
- * absolute addresses at all: every reference inside a schema is an INDEX into
- * a flat table rather than a pointer. Indices are integers, integer
- * initialisers need no relocation and no runtime work, and the whole tree can
- * therefore be const, in read-only data, identical for every kernel instance,
- * with no per-instance RAM and nothing to construct before first use. On a
- * target with 32 KiB of RAM that is the point: a schema costs flash, not RAM.
+ * Relationships between entries are indices rather than pointers, so the
+ * arrays need no relocation when another core runs a byte-for-byte copy of
+ * this kernel. A schema_table_t still holds four array pointers: a copied
+ * instance must rebind that small descriptor to its OWN const arrays at
+ * bootstrap (see cap.c), not retain the BSP's absolute pointer values.
+ * There is no runtime schema parser or per-object schema allocation.
  *
  * Everything is resolved against a schema_table_t, which owns the four flat
  * arrays. A resolved schema is therefore always a (table, index) pair -- an

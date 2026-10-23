@@ -2,6 +2,7 @@
 #include "cap.h"
 #include "macho.h"
 #include "../include/init_abi.h"
+#include "../include/smp_layout.h"
 #include "serial.h"
 #include "fdt.h"
 #include "xnu_boot_args.h"
@@ -14,7 +15,12 @@
 extern uint8_t g_embedded_init_start[];
 extern uint8_t g_embedded_init_end[];
 extern uint8_t _start[];
+extern uint8_t _end[];
+extern void kernel_boot_ap(uint64_t region_base); /* arch/boot_aarch64.S */
 typedef void (*init_entry_t)(struct init_boot_info *);
+
+_Static_assert(CORE_STACK_OFFSET + CORE_STACK_SIZE == 0x380000ull,
+               "ARM AP assembly stack offset must match smp_layout.h");
 
 /* Provided by arch/boot_aarch64.S: the DTB address captured from x0, and its
  * size, both zeroed by the stub if the blob failed validation. */
@@ -174,15 +180,22 @@ void kernel_boot_aarch64(void)
     static struct init_boot_info boot_info;
     boot_info.caps = kernel_cap_bootstrap();
     boot_info.kernel_invoke = kernel_invoke;
-    boot_info.kernel_load_base = (uint64_t)(uintptr_t)&_start;
-    /* AP entry and page tables do not exist yet on aarch64. Leave the
-     * image pair absent so init does not try to start a copied kernel. */
-    boot_info.kernel_boot_ap_addr = 0;
-    boot_info.pml4_phys = 0;
+    boot_info.kernel_load_base = (uint64_t)(uintptr_t)_start;
+    boot_info.pml4_phys = 0; /* ARM enters with the MMU off. */
     boot_info.init_image_addr = (uint64_t)(uintptr_t)g_embedded_init_start;
     boot_info.init_image_len = init_len;
-    boot_info.kernel_image_addr = 0;
-    boot_info.kernel_image_len = 0;
+    uint64_t image_len = (uint64_t)(_end - _start);
+    if (image_len <= CORE_KERNEL_MAX_SIZE) {
+        boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;
+        boot_info.kernel_image_addr = (uint64_t)(uintptr_t)_start;
+        boot_info.kernel_image_len = image_len;
+        kprintf("[kernel] AP image: %u bytes, entry 0x%X\n",
+                (unsigned)image_len, (unsigned)boot_info.kernel_boot_ap_addr);
+    } else {
+        kprintf("[kernel] AP image exceeds its region: %u > %u bytes; "
+                "SMP disabled\n", (unsigned)image_len,
+                (unsigned)CORE_KERNEL_MAX_SIZE);
+    }
     boot_info.early_rsdp_phys = g_rsdp_phys;
     boot_info.fdt_blob_phys = g_fdt_blob_phys;
     if (g_boot_x0 != 0 && g_fdt_blob_phys == 0) {
@@ -209,5 +222,62 @@ void kernel_boot_aarch64(void)
     kprintf("[kernel] handing off to init -- kernel does not run again after this\n");
     ((init_entry_t)(uintptr_t)entry)(&boot_info);
     kprintf("[kernel] PANIC: init returned\n");
+    halt_forever();
+}
+
+/* Reached via PSCI CPU_ON in a fresh, byte-for-byte copy of this kernel.
+ * arch/boot_aarch64.S sets this AP's stack from the region before C runs.
+ * All references here must be PC-relative: the copied image is not at the
+ * BSP's link address, and nobody processes relocation records for it. */
+void kernel_boot_ap_aarch64(uint64_t region_base)
+{
+    serial_init();
+    kprintf("[kernel] AP core booting at region 0x%X\n",
+            (unsigned)region_base);
+
+    /* Init's Mach-O declares where its BSP copy lives. Apply exactly the
+     * slide between that address and the init slot in this assigned region;
+     * target_base is a displacement, never another absolute vmaddr. */
+    uint64_t slide = region_base + CORE_INIT_OFFSET - BSP_INIT_LOAD_BASE;
+    uint64_t entry = macho_load(g_embedded_init_start, slide);
+    if (entry == 0) {
+        kprintf("[kernel] AP PANIC: failed to Mach-O-load init\n");
+        halt_forever();
+    }
+
+    const uint64_t *discovery =
+        (const uint64_t *)(uintptr_t)(region_base + CORE_DISCOVERY_OFFSET);
+    static struct init_boot_info boot_info;
+    boot_info.caps = kernel_cap_bootstrap();
+    boot_info.kernel_invoke = kernel_invoke;
+    boot_info.kernel_load_base = KERNEL_LOAD_BASE;
+    boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;
+    boot_info.pml4_phys = 0;
+    /* AP init does not orchestrate another layer of AP bring-up. */
+    boot_info.init_image_addr = 0;
+    boot_info.init_image_len = 0;
+    boot_info.kernel_image_addr = 0;
+    boot_info.kernel_image_len = 0;
+    boot_info.bsp_kernel_invoke_addr =
+        discovery[CORE_DISCOVERY_BSP_INVOKE_OFF / 8];
+    boot_info.mutex_manager_handle = discovery[CORE_DISCOVERY_MUTEX_MGR_OFF / 8];
+    boot_info.memory_manager_handle = discovery[CORE_DISCOVERY_MEM_MGR_OFF / 8];
+    boot_info.hardware_mutex_id = discovery[CORE_DISCOVERY_HW_MUTEX_ID_OFF / 8];
+    boot_info.lapic_calibration_count =
+        discovery[CORE_DISCOVERY_LAPIC_CALIBRATION_OFF / 8];
+    boot_info.cluster_scheduler_handle =
+        discovery[CORE_DISCOVERY_CLUSTER_SCHED_OFF / 8];
+    boot_info.serial_resource_handle =
+        discovery[CORE_DISCOVERY_SERIAL_RESOURCE_OFF / 8];
+    boot_info.early_rsdp_phys = discovery[CORE_DISCOVERY_RSDP_OFF / 8];
+    /* The BSP's physical DTB address is in the copied kernel's initialized
+     * data (g_fdt_blob_phys). Firmware doesn't provide x0=DTB to an AP. */
+    boot_info.fdt_blob_phys = g_fdt_blob_phys;
+    boot_info.own_mailbox_base = region_base + CORE_MAILBOX_OFFSET;
+
+    kprintf("[kernel] AP handing off to its own init copy at 0x%X\n",
+            (unsigned)entry);
+    ((init_entry_t)(uintptr_t)entry)(&boot_info);
+    kprintf("[kernel] AP PANIC: init returned\n");
     halt_forever();
 }
