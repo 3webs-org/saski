@@ -194,7 +194,11 @@ if [ "$ARCH" = "aarch64" ]; then
     # both.
     LDELFD="${LDELFD:-$(dirname "$LD64")/ld.lld}"
     [ -x "$LDELFD" ] || { echo "build.sh: no ld.lld next to $LD64; set LDELFD" >&2; exit 1; }
-    "$LDELFD" -e _start -Ttext $AARCH64_LOAD_BASE \
+    # AArch64 ELF's default 64 KiB segment alignment puts 128 KiB of
+    # zero-filled gaps between .text, .rodata and .data in the flat Image.
+    # QEMU virt uses 4 KiB pages; 4 KiB segment alignment keeps the same
+    # load addresses while eliminating 120 KiB of those file gaps.
+    "$LDELFD" -e _start -Ttext $AARCH64_LOAD_BASE -z max-page-size=4096 \
         -o "$BUILD/saski_raw.macho" \
         "$BUILD/boot.o" "$BUILD/kernel.o" "$BUILD/serial.o" "$BUILD/serial_fmt.o" \
         "$BUILD/cap.o" "$BUILD/capnp_validate.o" "$BUILD/macho.o" \
