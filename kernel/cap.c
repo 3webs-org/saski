@@ -50,20 +50,42 @@ static cap_record_t g_factory_record;
  * call kernel_invoke, and holding this across that would self-deadlock. */
 static volatile int g_cap_lock = 0;
 
-static void cap_lock(void)
+/* Mask local IRQs BEFORE attempting this lock: a timer interrupt can
+ * re-enter kernel_invoke on the same core while its interrupted caller owns
+ * the lock. Save and restore only the prior IRQ state, including when the
+ * caller was already running with interrupts masked. */
+typedef uint64_t cap_irq_state_t;
+
+static cap_irq_state_t cap_lock(void)
 {
+    cap_irq_state_t prior;
+#if defined(__aarch64__)
+    __asm__ volatile("mrs %0, daif\n\tmsr daifset, #2"
+                     : "=r"(prior) : : "memory");
+#else
+    __asm__ volatile("pushfq\n\tpopq %0\n\tcli"
+                     : "=r"(prior) : : "memory");
+#endif
     while (__sync_lock_test_and_set(&g_cap_lock, 1)) {
         while (g_cap_lock) {
-            /* spin without retrying the atomic op until it looks free --
-             * cheaper than hammering a shared cache line with locked
-             * instructions from multiple cores */
+            /* Wait without hammering the shared cache line. */
         }
     }
+    return prior;
 }
 
-static void cap_unlock(void)
+static void cap_unlock(cap_irq_state_t prior)
 {
     __sync_lock_release(&g_cap_lock);
+#if defined(__aarch64__)
+    if ((prior & (1ull << 7)) == 0) {
+        __asm__ volatile("msr daifclr, #2" : : : "memory");
+    }
+#else
+    if (prior & (1ull << 9)) {
+        __asm__ volatile("sti" : : : "memory");
+    }
+#endif
 }
 
 /* ---- Object 0's own wire protocol ----
@@ -178,14 +200,14 @@ static void factory_handler(void *data, uint32_t method_id,
         }
 
         cap_record_t *r = (cap_record_t *)record_storage;
-        cap_lock();
+        cap_irq_state_t irq_state = cap_lock();
         r->magic = CAP_RECORD_MAGIC;
         r->valid = 1;
         r->handler = handler;
         r->data = handler_data;
         r->schema_table = schema_table;
         r->schema_index = schema_index;
-        cap_unlock();
+        cap_unlock(irq_state);
 
         uint64_t handle = (uint64_t)(uintptr_t)record_storage;
         if (response_cap >= 24) {
@@ -219,7 +241,7 @@ static void factory_handler(void *data, uint32_t method_id,
         }
         cap_record_t *r = (cap_record_t *)(uintptr_t)target;
 
-        cap_lock();
+        cap_irq_state_t irq_state = cap_lock();
         if (r->magic != CAP_RECORD_MAGIC || !r->valid) {
             /* Double-destroy guard, and catches a handle that was never
              * a real record in the first place -- without the magic
@@ -228,7 +250,7 @@ static void factory_handler(void *data, uint32_t method_id,
              * because the caller (not the kernel) owns the underlying
              * memory; the check still catches a clear caller mistake
              * early with a real diagnostic instead of not at all. */
-            cap_unlock();
+            cap_unlock(irq_state);
             kprintf("[kernel] factory: destroy refused for handle 0x%X, "
                     "not a live capability\n",
                     (unsigned)target);
@@ -242,7 +264,7 @@ static void factory_handler(void *data, uint32_t method_id,
         r->data = NULL;
         r->schema_table = NULL;
         r->schema_index = SCHEMA_IDX_NONE;
-        cap_unlock();
+        cap_unlock(irq_state);
         return;
     }
 
@@ -331,15 +353,15 @@ int kernel_invoke(capability_t target, uint32_t method_id, const void *msg,
      * assumed solved here). magic still catches the simple case of a
      * stale or garbage handle; it does not catch a handle that got
      * legitimately reused for something else between two calls. */
-    cap_lock();
+    cap_irq_state_t irq_state = cap_lock();
     if (target_record->magic != CAP_RECORD_MAGIC || !target_record->valid) {
-        cap_unlock();
+        cap_unlock(irq_state);
         kprintf("[kernel] kernel_invoke: invalid capability 0x%X\n",
                 (unsigned)target.handle);
         return 0;
     }
     cap_record_t record = *target_record;
-    cap_unlock();
+    cap_unlock(irq_state);
 
     const method_schema_t *method = find_method(record.schema_table,
                                                 record.schema_index, method_id);
