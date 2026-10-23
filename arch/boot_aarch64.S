@@ -162,7 +162,11 @@ ap_hang:
 
 .align 4
 stack_bottom:
-    .space 65536
+    /* The reference init's BSP stack peaked at 3312 bytes in a sentinel
+     * SMP4 boot (including securinit). Keep 16 KiB file-backed for every
+     * loader path: nearly five times that measured depth. APs use their
+     * separate region stacks, not this BSP reservation. */
+    .space 16384
 .global _stack_top
 _stack_top:
 
