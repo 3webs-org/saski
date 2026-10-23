@@ -7,13 +7,11 @@
 # firmware, GRUB (arm64-efi), the EFI stub -- and grades the serial
 # output by tier, exactly as tools/qemu-boot.sh does for x86_64.
 #
-# WHY A STUB AND NOT GRUB'S xnu LOADER. grub-efi-arm64-bin ships no
-# xnu.mod (the xnu command is x86-only in GRUB's own source), so the
-# aarch64 path cannot reuse the x86_64 Mach-O/GRUB convention. Instead
-# build.sh wraps the kernel's flat image in a minimal EFI stub
-# (tools/mkstub.py) that GRUB chainloads; the stub copies the kernel to
-# its link address, turns the MMU off, and jumps to it with the DTB
-# pointer in x0 -- the standard arm64 boot protocol.
+# Stock grub-efi-arm64-bin has no xnu.mod, so this judge tests both the
+# chainloaded EFI stub and (when available) otos-coreinit's arm64 build of
+# GRUB's xnu loader. The stub copies the flat kernel to its link address,
+# turns the MMU off and enters with the DTB pointer in x0. The xnu path
+# instead enters with its v2 boot-parameter block in x0.
 #
 # PURELY ADDITIVE, like the x86_64 judge: it consumes build/saski.efi
 # and never touches the kernel build or sources.
@@ -26,6 +24,9 @@ WORK="${WORK:-$SASKI_BUILD/arm-judge}"
 BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-60}"
 FETCH_DEPS="${FETCH_DEPS:-1}"
 COREINIT_ROOT="${COREINIT_ROOT:-$ROOT/../otos-coreinit}"
+# Default matrix gates both QEMU virt interrupt controllers. GIC_VERSION=3
+# selects just v3 for a focused run; GIC_VERSIONS="2 3" is the full matrix.
+GIC_VERSIONS="${GIC_VERSIONS:-${GIC_VERSION:-2 3}}"
 # GRUB's own xnu loader built for arm64-efi (otos-coreinit
 # tools/grub-xnu-arm64). When present, the judge ALSO boots
 # build/saski-xnu.macho through xnu_kernel64 with the x86_64 judge's
@@ -163,9 +164,9 @@ run_qemu() {
     disk="${1:-$WORK/disk.img}"
     vars_copy="$WORK/vars.fd"
     cp "$AAVMF_VARS" "$vars_copy"
-    log="$WORK/boot-$(basename "$disk" .img).log"
+    log="$WORK/boot-$(basename "$disk" .img)-gic${GIC_VERSION}-${2:-stub}.log"
     rm -f "$log"
-    "$QEMU" -machine "virt${QEMU_MACHINE_OPTS:-}" -cpu cortex-a57 -m 512 -smp "${SMP_CPUS:-1}" \
+    "$QEMU" -machine "virt,gic-version=${GIC_VERSION}${QEMU_MACHINE_OPTS:-}" -cpu cortex-a57 -m 512 -smp "${SMP_CPUS:-1}" \
         -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
         -drive if=pflash,format=raw,file="$vars_copy" \
         -drive file="$disk",format=raw,if=virtio \
@@ -223,8 +224,8 @@ grade() {
 # The xnu_kernel64 path: same disk, plus xnu.mod and the Mach-O, and the
 # x86_64 judge's real-boot grub.cfg unchanged. Graded on the entry
 # contract the kernel can observe: it booted, and it recognised x0 as a v2
-# boot-parameter block. DTB discovery on this path goes through the EFI
-# system table the block carries; reported, not yet required.
+# boot-parameter block. Machine-description discovery through its EFI
+# system table and a working self-IPI are both required.
 xnu_boot() {
     [ -f "$XNU_MOD" ] || { say "xnu path: NOT RUN (no xnu.mod at $XNU_MOD)"; return 0; }
     [ -f "$SASKI_BUILD/saski-xnu.macho" ] || fail "no $SASKI_BUILD/saski-xnu.macho -- rebuild with ARCH=aarch64"
@@ -243,14 +244,14 @@ boot' > "$WORK/grub-xnu.cfg"
     # Two firmware personalities, both standard: AAVMF publishes ACPI and
     # hides the DT by default, and publishes the DT when ACPI is off. The
     # kernel must find the machine description either way.
-    rc=0
+    xnu_rc=0
     for mode in acpi dt; do
         if [ "$mode" = dt ]; then QEMU_MACHINE_OPTS=",acpi=off"; want='DTB found via EFI configuration table'
         else QEMU_MACHINE_OPTS=""; want='ACPI RSDP via EFI configuration table'; fi
         say ""
-        say "=== booting under AAVMF ($mode) + GRUB xnu_kernel64 ==="
-        xlog=$(QEMU_MACHINE_OPTS="$QEMU_MACHINE_OPTS" run_qemu "$xdisk")
-        cp "$xlog" "$WORK/boot-xnu-$mode.log"
+        say "=== booting under AAVMF ($mode, GICv$GIC_VERSION) + GRUB xnu_kernel64 ==="
+        xlog=$(QEMU_MACHINE_OPTS="$QEMU_MACHINE_OPTS" run_qemu "$xdisk" "$mode")
+        cp "$xlog" "$WORK/boot-xnu-$mode-gic$GIC_VERSION.log"
         sed -n '4,20p' "$xlog"
         if ! grep -qF 'Synchronous Exception at' "$xlog" && \
            ! grep -qF '[kernel] PANIC' "$xlog" && \
@@ -264,13 +265,13 @@ boot' > "$WORK/grub-xnu.cfg"
            grep -qF '[coreinit] === job: timer bring-up ===' "$xlog" && \
            grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$xlog" && \
            grep -qF 'cross_core_signal: self-test PASS' "$xlog"; then
-            say "xnu path ($mode): PASS (boot params v2 + $want + self-IPI)"
+            say "xnu path ($mode, GICv$GIC_VERSION): PASS (boot params v2 + $want + self-IPI)"
         else
-            say "xnu path ($mode): FAIL (wanted: $want and self-IPI PASS)"
-            rc=1
+            say "xnu path ($mode, GICv$GIC_VERSION): FAIL (wanted: $want and self-IPI PASS)"
+            xnu_rc=1
         fi
     done
-    return $rc
+    return "$xnu_rc"
 }
 
 main() {
@@ -279,13 +280,24 @@ main() {
     check_image
     build_disk
     say ""
-    say "=== booting under AAVMF + GRUB (arm64-efi) ==="
-    klog=$(run_qemu)
-    cp "$klog" "$WORK/kernel-stage.log" 2>/dev/null || true
     rc=0
-    grade "$klog" || rc=1
-    xnu_boot || rc=1
-    exit $rc
+    for gic_version in $GIC_VERSIONS; do
+        case "$gic_version" in
+            2|3) GIC_VERSION="$gic_version" ;;
+            *) fail "unsupported GIC version $gic_version (expected 2 or 3)" ;;
+        esac
+        say ""
+        say "=== booting under AAVMF + GRUB (arm64-efi, GICv$GIC_VERSION) ==="
+        klog=$(run_qemu)
+        grade "$klog" || rc=1
+        xnu_boot || rc=1
+    done
+    if [ "$rc" -eq 0 ]; then
+        say "GIC matrix: PASS ($GIC_VERSIONS)"
+    else
+        say "GIC matrix: FAIL ($GIC_VERSIONS)"
+    fi
+    exit "$rc"
 }
 
 main "$@"
