@@ -173,8 +173,20 @@ if [ "$ARCH" = "aarch64" ]; then
         "$BUILD/cap.o" "$BUILD/capnp_validate.o" "$BUILD/macho.o" \
         "$BUILD/kernel_boot_aarch64.o" "$BUILD/fdt.o" $DROPIN
     # macho_to_xnu.py is an x86_64 Mach-O converter; an aarch64 image does not
-    # go through it. The raw ELF is the artifact.
+    # go through it. The raw ELF is the artifact for -kernel boots; the EFI
+    # stub (below) is the artifact for GRUB/AAVMF boots.
     cp "$BUILD/saski_raw.macho" "$BUILD/saski.macho"
+    # The flat binary + EFI stub: GRUB's xnu loader does not exist for
+    # arm64 (grub-efi-arm64-bin ships no xnu.mod), so the aarch64 path
+    # cannot reuse the x86_64 Mach-O/GRUB convention. Instead the flat
+    # image is wrapped in a minimal EFI application that GRUB
+    # chainloads; the stub copies the kernel to its link address, turns
+    # the MMU off, and jumps to it with the DTB pointer in x0 -- the
+    # standard arm64 boot protocol. tools/qemu-boot-aarch64.sh is the
+    # judge for this path.
+    OBJCOPY="${OBJCOPY:-$(command -v llvm-objcopy || echo /nix/store/ak5yjnphlhn8lx51vinhx1wiyjxg1fsp-llvm-21.1.8/bin/llvm-objcopy)}"
+    "$OBJCOPY" -O binary "$BUILD/saski.macho" "$BUILD/saski.bin"
+    python3 "$ROOT/tools/mkstub.py" "$BUILD/saski.bin" "$BUILD/saski.efi"
 else
 "$LD64" -arch x86_64 -platform_version macos 10.12 10.12 \
     -e _start -pagezero_size 0x1000000 \

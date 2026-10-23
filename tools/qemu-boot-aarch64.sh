@@ -1,0 +1,213 @@
+#!/bin/sh
+# SPDX-License-Identifier: 0BSD
+#
+# The aarch64 QEMU boot judge for saski.
+#
+# Boots the kernel through the STANDARD-platform convention -- AAVMF
+# firmware, GRUB (arm64-efi), the EFI stub -- and grades the serial
+# output by tier, exactly as tools/qemu-boot.sh does for x86_64.
+#
+# WHY A STUB AND NOT GRUB'S xnu LOADER. grub-efi-arm64-bin ships no
+# xnu.mod (the xnu command is x86-only in GRUB's own source), so the
+# aarch64 path cannot reuse the x86_64 Mach-O/GRUB convention. Instead
+# build.sh wraps the kernel's flat image in a minimal EFI stub
+# (tools/mkstub.py) that GRUB chainloads; the stub copies the kernel to
+# its link address, turns the MMU off, and jumps to it with the DTB
+# pointer in x0 -- the standard arm64 boot protocol.
+#
+# PURELY ADDITIVE, like the x86_64 judge: it consumes build/saski.efi
+# and never touches the kernel build or sources.
+set -e
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SASKI_BUILD="${SASKI_BUILD:-$ROOT/build}"
+DEPS_DIR="${DEPS_DIR:-$SASKI_BUILD/arm-deps}"
+WORK="${WORK:-$SASKI_BUILD/arm-judge}"
+BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-60}"
+FETCH_DEPS="${FETCH_DEPS:-1}"
+
+QEMU="${QEMU:-/nix/store/59hhc8zlvdlbcls7dkbhkhw9afwb6mps-qemu-11.1.2/bin/qemu-system-aarch64}"
+AAVMF_CODE="${AAVMF_CODE:-$DEPS_DIR/qemu-efi-aarch64/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd}"
+AAVMF_VARS="${AAVMF_VARS:-$DEPS_DIR/qemu-efi-aarch64/usr/share/AAVMF/AAVMF_VARS.fd}"
+GRUB_EFI="${GRUB_EFI:-$DEPS_DIR/grub-efi-arm64-signed/usr/lib/grub/arm64-efi-signed/grubaa64.efi.signed}"
+GRUB_MODULES_DIR="${GRUB_MODULES_DIR:-$DEPS_DIR/grub-efi-arm64-bin/usr/lib/grub/arm64-efi}"
+MTOOLS_BIN="${MTOOLS_BIN:-/nix/store/nmcdf0f6c58r9g3l26104a5ak32m207p-mtools-4.0.49/bin}"
+
+say() { printf '%s\n' "$*"; }
+fail() { printf 'qemu-boot-aarch64.sh: %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# STEP 0 -- fetch the firmware and loader artifacts if absent. Same pure-
+# data .deb extraction as the x86_64 judge (a .deb is an ar archive
+# containing a tar; no Linux binary is executed).
+# ---------------------------------------------------------------------------
+fetch_deps() {
+    [ -d "$GRUB_MODULES_DIR" ] && [ -f "$GRUB_EFI" ] && [ -f "$AAVMF_CODE" ] && return 0
+    [ "$FETCH_DEPS" = "1" ] || fail "deps missing and FETCH_DEPS=0"
+    say "fetching aarch64 firmware and loader artifacts into $DEPS_DIR"
+    mkdir -p "$DEPS_DIR"
+    python3 - "$DEPS_DIR" <<'PY_EOF'
+import os, sys, subprocess, gzip, tarfile, hashlib
+
+dest = sys.argv[1]
+base = "https://deb.debian.org/debian"
+index = base + "/dists/trixie/main/binary-arm64/Packages.gz"
+raw = subprocess.run(["curl", "-sSL", "--max-time", "180", index],
+                     capture_output=True, check=True).stdout
+text = gzip.decompress(raw).decode("utf-8", "replace")
+want = ["grub-efi-arm64-bin", "grub-efi-arm64-signed", "qemu-efi-aarch64"]
+entries = {}
+cur = None
+for line in text.splitlines():
+    if line.startswith("Package: "):
+        cur = line.split(": ", 1)[1].strip()
+    elif cur in want and line.startswith("Filename: "):
+        entries.setdefault(cur, {})["filename"] = line.split(": ", 1)[1].strip()
+    elif cur in want and line.startswith("MD5sum: "):
+        entries.setdefault(cur, {})["md5"] = line.split(": ", 1)[1].strip()
+    elif not line.strip():
+        cur = None
+for pkg in want:
+    if pkg not in entries or "filename" not in entries[pkg]:
+        print("MISSING INDEX ENTRY: " + pkg); sys.exit(1)
+    fn = entries[pkg]["filename"]
+    url = base + "/" + fn.lstrip("/")
+    out = os.path.join(dest, pkg + ".deb")
+    if not os.path.exists(out):
+        subprocess.run(["curl", "-sSL", "--max-time", "300", "-o", out, url], check=True)
+    data = open(out, "rb").read()
+    if data[:8] != b"!<arch>\n":
+        print("NOT AN AR ARCHIVE: " + pkg); sys.exit(1)
+    md5 = hashlib.md5(data).hexdigest()
+    if "md5" in entries[pkg] and md5 != entries[pkg]["md5"]:
+        print("MD5 MISMATCH " + pkg); sys.exit(1)
+    off = 8
+    members = {}
+    while off + 60 <= len(data):
+        hdr = data[off:off + 60]
+        name = hdr[0:16].decode("utf-8", "replace").strip().rstrip("/")
+        try:
+            size = int(hdr[48:58].decode("utf-8").strip())
+        except ValueError:
+            break
+        members[name] = data[off + 60:off + 60 + size]
+        off += 60 + size + (size % 2)
+    target = os.path.join(dest, pkg)
+    os.makedirs(target, exist_ok=True)
+    for name, body in members.items():
+        if name.startswith("data.tar"):
+            tmp = os.path.join(dest, pkg + ".tar")
+            open(tmp, "wb").write(body)
+            tarfile.open(tmp).extractall(target)
+            os.remove(tmp)
+    print("extracted " + pkg)
+PY_EOF
+}
+
+# ---------------------------------------------------------------------------
+# STEP 1 -- pre-boot assertions.
+# ---------------------------------------------------------------------------
+check_image() {
+    STUB="$SASKI_BUILD/saski.efi"
+    [ -f "$STUB" ] || fail "no EFI stub at $STUB -- run build.sh with ARCH=aarch64 first"
+    file "$STUB" | grep -q 'PE32+ executable (EFI application) Aarch64' \
+        || fail "$STUB is not an Aarch64 EFI application"
+    say "stub: $(file -b "$STUB" | sed 's/, for MS Windows//')"
+}
+
+# ---------------------------------------------------------------------------
+# STEP 2 -- assemble the boot disk: FAT16 ESP, GRUB signed image at
+# /EFI/BOOT/BOOTAA64.EFI, the module tree at /EFI/debian/arm64-efi (the
+# prefix Debian's grubaa64.efi embeds), the stub at /saski.efi.
+# ---------------------------------------------------------------------------
+build_disk() {
+    esp="$WORK/disk.img"
+    rm -f "$esp"
+    dd if=/dev/zero of="$esp" bs=512 count=65536 >/dev/null 2>&1
+    "$MTOOLS_BIN/mformat" -i "$esp" -v SASKI :: >/dev/null
+    fstype=$(file -b "$esp")
+    case "$fstype" in
+        *"FAT (32 bit)"*) fail "ESP came out FAT32; AAVMF will not boot it. Force FAT16." ;;
+        *"FAT (16 bit)"*) : ;;
+        *) fail "ESP is not a FAT filesystem: $fstype" ;;
+    esac
+    "$MTOOLS_BIN/mmd" -i "$esp" ::/EFI ::/EFI/BOOT ::/EFI/debian ::/EFI/debian/arm64-efi
+    "$MTOOLS_BIN/mcopy" -i "$esp" "$GRUB_EFI" ::/EFI/BOOT/BOOTAA64.EFI
+    "$MTOOLS_BIN/mcopy" -i "$esp" "$SASKI_BUILD/saski.efi" ::/saski.efi
+    printf '%s\n' 'set prefix=(hd0)/EFI/debian
+set root=(hd0)
+chainloader /saski.efi
+boot' > "$WORK/grub.cfg"
+    "$MTOOLS_BIN/mcopy" -i "$esp" "$WORK/grub.cfg" ::/EFI/debian/grub.cfg
+    for m in "$GRUB_MODULES_DIR"/*.mod; do
+        "$MTOOLS_BIN/mcopy" -i "$esp" "$m" ::/EFI/debian/arm64-efi/ >/dev/null
+    done
+    say "wrote $esp (raw FAT16 superfloppy, no partition table)"
+}
+
+# ---------------------------------------------------------------------------
+# STEP 3 -- boot and grade.
+# ---------------------------------------------------------------------------
+run_qemu() {
+    vars_copy="$WORK/vars.fd"
+    cp "$AAVMF_VARS" "$vars_copy"
+    log="$WORK/boot.log"
+    rm -f "$log"
+    "$QEMU" -machine virt -cpu cortex-a57 -m 512 -smp "${SMP_CPUS:-1}" \
+        -drive if=pflash,format=raw,readonly=on,file="$AAVMF_CODE" \
+        -drive if=pflash,format=raw,file="$vars_copy" \
+        -drive file="$WORK/disk.img",format=raw,if=virtio \
+        -display none -serial file:"$log" -monitor none -no-reboot \
+        > /dev/null 2>&1 &
+    qpid=$!
+    waited=0
+    while [ "$waited" -lt "$BOOT_TIMEOUT_S" ]; do
+        kill -0 "$qpid" 2>/dev/null || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    kill "$qpid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$qpid" 2>/dev/null || true
+    wait "$qpid" 2>/dev/null || true
+    printf '%s' "$log"
+}
+
+grade() {
+    log="$1"
+    say ""
+    say "=== firmware + GRUB stage ==="
+    sed -n '1,8p' "$log"
+    say ""
+    say "=== kernel stage ==="
+    tail -20 "$log"
+    say ""
+    tier=0
+    if grep -qF '[kernel] aarch64 boot' "$log"; then tier=1; fi
+    if [ "$tier" = "1" ] && grep -qF 'DTB at 0x' "$log" && grep -qF 'valid' "$log"; then tier=2; fi
+    if [ "$tier" = "2" ] && grep -qF 'memory: base' "$log"; then tier=3; fi
+    say "highest tier reached: T$tier"
+    if [ "$tier" = "3" ]; then
+        say "RESULT: PASS (T3: boot + DTB valid + memory ranges parsed)"
+        return 0
+    fi
+    say "RESULT: FAIL"
+    return 1
+}
+
+main() {
+    mkdir -p "$WORK"
+    fetch_deps
+    check_image
+    build_disk
+    say ""
+    say "=== booting under AAVMF + GRUB (arm64-efi) ==="
+    klog=$(run_qemu)
+    cp "$klog" "$WORK/kernel-stage.log" 2>/dev/null || true
+    if grade "$klog"; then
+        exit 0
+    fi
+    exit 1
+}
+
+main "$@"

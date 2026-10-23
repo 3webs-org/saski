@@ -4,9 +4,20 @@
 
 #define MH_MAGIC_64     0xfeedfacfu
 #define FAT_MAGIC       0xcafebabeu
-#define CPU_TYPE_X86_64 0x01000007u
 #define LC_SEGMENT_64   0x19u
 #define LC_MAIN         0x80000028u /* 0x28 | LC_REQ_DYLD */
+
+/* The CPU type this kernel loads init for. It is the RUNNING architecture's
+ * own type, not a fixed constant: init is built for the same target as the
+ * kernel that loads it, so a hardcoded x86_64 here would reject a perfectly
+ * valid arm64 init on an arm64 kernel. Both values are from Apple's own
+ * <mach/machine.h> (CPU_TYPE_X86_64 = CPU_TYPE_X86 | CPU_ARCH_ABI64,
+ * CPU_TYPE_ARM64 = CPU_TYPE_ARM | CPU_ARCH_ABI64). */
+#if defined(__aarch64__)
+#define CPU_TYPE_NATIVE 0x0100000cu /* CPU_TYPE_ARM64 */
+#else
+#define CPU_TYPE_NATIVE 0x01000007u /* CPU_TYPE_X86_64 */
+#endif
 
 typedef struct {
     uint32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags,
@@ -41,10 +52,10 @@ static uint32_t rd_be32(const uint8_t *p)
            ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
-/* Returns the byte offset of the x86_64 slice within `image`, or 0 if
- * `image` is already a plain (non-fat) x86_64 Mach-O, or UINT32_MAX on
- * failure (neither a fat image nor a directly-recognizable one, or no
- * x86_64 slice present in a fat one). */
+/* Returns the byte offset of the native-architecture slice within `image`,
+ * or 0 if `image` is already a plain (non-fat) Mach-O of that
+ * architecture, or UINT32_MAX on failure (neither a fat image nor a
+ * directly-recognizable one, or no native slice present in a fat one). */
 static uint32_t resolve_slice_offset(const uint8_t *image)
 {
     uint32_t magic_native = *(const uint32_t *)image;
@@ -61,7 +72,7 @@ static uint32_t resolve_slice_offset(const uint8_t *image)
     for (uint32_t i = 0; i < nfat_arch; i++) {
         uint32_t cputype = rd_be32(arch + 0);
         uint32_t offset = rd_be32(arch + 8);
-        if (cputype == CPU_TYPE_X86_64) {
+        if (cputype == CPU_TYPE_NATIVE) {
             return offset;
         }
         arch += 20; /* sizeof(struct fat_arch) */
@@ -74,7 +85,7 @@ uint64_t macho_load(const void *image_raw, uint64_t target_base)
     const uint8_t *base = (const uint8_t *)image_raw;
     uint32_t slice_off = resolve_slice_offset(base);
     if (slice_off == 0xFFFFFFFFu) {
-        kprintf("[kernel] macho_load: no recognizable x86_64 slice\n");
+        kprintf("[kernel] macho_load: no recognizable native-arch slice\n");
         return 0;
     }
 
@@ -84,8 +95,9 @@ uint64_t macho_load(const void *image_raw, uint64_t target_base)
         kprintf("[kernel] macho_load: bad slice magic\n");
         return 0;
     }
-    if (mh->cputype != CPU_TYPE_X86_64) {
-        kprintf("[kernel] macho_load: slice is not x86_64\n");
+    if (mh->cputype != CPU_TYPE_NATIVE) {
+        kprintf("[kernel] macho_load: slice cputype 0x%X is not the native arch\n",
+                (unsigned)mh->cputype);
         return 0;
     }
 
@@ -180,7 +192,7 @@ uint64_t macho_image_size(const void *image_raw)
 
     const uint8_t *slice = base + slice_off;
     const mach_header_64_t *mh = (const mach_header_64_t *)slice;
-    if (mh->magic != MH_MAGIC_64 || mh->cputype != CPU_TYPE_X86_64) {
+    if (mh->magic != MH_MAGIC_64 || mh->cputype != CPU_TYPE_NATIVE) {
         return 0;
     }
 
