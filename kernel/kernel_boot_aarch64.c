@@ -185,16 +185,20 @@ void kernel_boot_aarch64(void)
     boot_info.init_image_addr = (uint64_t)(uintptr_t)g_embedded_init_start;
     boot_info.init_image_len = init_len;
     uint64_t image_len = (uint64_t)(_end - _start);
-    if (image_len <= CORE_KERNEL_MAX_SIZE) {
+    uint64_t init_footprint = macho_image_size(g_embedded_init_start);
+    if (image_len <= CORE_KERNEL_MAX_SIZE && init_footprint != 0 &&
+        init_footprint <= CORE_INIT_MAX_SIZE) {
         boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;
         boot_info.kernel_image_addr = (uint64_t)(uintptr_t)_start;
         boot_info.kernel_image_len = image_len;
-        kprintf("[kernel] AP image: %u bytes, entry 0x%X\n",
-                (unsigned)image_len, (unsigned)boot_info.kernel_boot_ap_addr);
+        kprintf("[kernel] AP image: %u bytes, init footprint %u bytes, entry 0x%X\n",
+                (unsigned)image_len, (unsigned)init_footprint,
+                (unsigned)boot_info.kernel_boot_ap_addr);
     } else {
-        kprintf("[kernel] AP image exceeds its region: %u > %u bytes; "
-                "SMP disabled\n", (unsigned)image_len,
-                (unsigned)CORE_KERNEL_MAX_SIZE);
+        kprintf("[kernel] AP images do not fit assigned region "
+                "(kernel %u/%u, init %u/%u bytes); SMP disabled\n",
+                (unsigned)image_len, (unsigned)CORE_KERNEL_MAX_SIZE,
+                (unsigned)init_footprint, (unsigned)CORE_INIT_MAX_SIZE);
     }
     boot_info.early_rsdp_phys = g_rsdp_phys;
     boot_info.fdt_blob_phys = g_fdt_blob_phys;
