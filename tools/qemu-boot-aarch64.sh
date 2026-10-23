@@ -25,6 +25,7 @@ DEPS_DIR="${DEPS_DIR:-$SASKI_BUILD/arm-deps}"
 WORK="${WORK:-$SASKI_BUILD/arm-judge}"
 BOOT_TIMEOUT_S="${BOOT_TIMEOUT_S:-60}"
 FETCH_DEPS="${FETCH_DEPS:-1}"
+COREINIT_ROOT="${COREINIT_ROOT:-$ROOT/../otos-coreinit}"
 # GRUB's own xnu loader built for arm64-efi (otos-coreinit
 # tools/grub-xnu-arm64). When present, the judge ALSO boots
 # build/saski-xnu.macho through xnu_kernel64 with the x86_64 judge's
@@ -117,6 +118,11 @@ check_image() {
     [ -f "$STUB" ] || fail "no EFI stub at $STUB -- run build.sh with ARCH=aarch64 first"
     file "$STUB" | grep -q 'PE32+ executable (EFI application) Aarch64' \
         || fail "$STUB is not an Aarch64 EFI application"
+    SNAPSHOT="$SASKI_BUILD/embedded-init.macho"
+    SOURCE_INIT="${INIT_MACHO:-$COREINIT_ROOT/build/coreinit.macho}"
+    [ -f "$SNAPSHOT" ] || fail "no $SNAPSHOT -- rebuild with ARCH=aarch64"
+    [ -f "$SOURCE_INIT" ] || fail "no init at $SOURCE_INIT -- set INIT_MACHO to the image embedded by build.sh"
+    cmp -s "$SNAPSHOT" "$SOURCE_INIT" || fail "init image changed since $STUB was built -- rebuild saski before judging it"
     say "stub: $(file -b "$STUB" | sed 's/, for MS Windows//')"
 }
 
@@ -188,6 +194,10 @@ grade() {
     say "=== kernel stage ==="
     tail -20 "$log"
     say ""
+    if grep -qF 'Synchronous Exception at' "$log" || grep -qF '[kernel] PANIC' "$log"; then
+        say "RESULT: FAIL (unhandled exception or kernel panic after boot)"
+        return 1
+    fi
     tier=0
     if grep -qF '[kernel] aarch64 boot' "$log"; then tier=1; fi
     if [ "$tier" = "1" ] && grep -qF 'DTB at 0x' "$log" && grep -qF 'valid' "$log"; then tier=2; fi
@@ -196,12 +206,15 @@ grade() {
        grep -qF '[kernel] handing off to init' "$log" && \
        grep -qF '[kernel] factory: created handle' "$log"; then tier=4; fi
     if [ "$tier" = "4" ] && grep -qF '[coreinit] stage 1:' "$log"; then tier=5; fi
+    if [ "$tier" = "5" ] && \
+       grep -qF '[coreinit] === job: timer bring-up ===' "$log" && \
+       grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$log"; then tier=6; fi
     say "highest tier reached: T$tier"
-    if [ "$tier" -ge 5 ]; then
-        say "RESULT: PASS (T5: DTB + init handoff + coreinit stage 1)"
+    if [ "$tier" -ge 6 ]; then
+        say "RESULT: PASS (T6: DTB + init handoff + scheduled coreinit jobs)"
         return 0
     fi
-    say "RESULT: FAIL (highest partial tier T$tier; coreinit stage 1 not observed)"
+    say "RESULT: FAIL (highest partial tier T$tier; scheduled coreinit jobs not observed)"
     return 1
 }
 
@@ -237,16 +250,20 @@ boot' > "$WORK/grub-xnu.cfg"
         xlog=$(QEMU_MACHINE_OPTS="$QEMU_MACHINE_OPTS" run_qemu "$xdisk")
         cp "$xlog" "$WORK/boot-xnu-$mode.log"
         sed -n '4,20p' "$xlog"
-        if grep -qF '[kernel] aarch64 boot' "$xlog" && \
+        if ! grep -qF 'Synchronous Exception at' "$xlog" && \
+           ! grep -qF '[kernel] PANIC' "$xlog" && \
+           grep -qF '[kernel] aarch64 boot' "$xlog" && \
            grep -qF 'x0 = xnu boot params v2' "$xlog" && \
            grep -qF "$want" "$xlog" && \
            grep -qF '[kernel] embedded init image:' "$xlog" && \
            grep -qF '[kernel] handing off to init' "$xlog" && \
            grep -qF '[kernel] factory: created handle' "$xlog" && \
-           grep -qF '[coreinit] stage 1:' "$xlog"; then
-            say "xnu path ($mode): PASS (boot params v2 + $want + coreinit stage 1)"
+           grep -qF '[coreinit] stage 1:' "$xlog" && \
+           grep -qF '[coreinit] === job: timer bring-up ===' "$xlog" && \
+           grep -qF '[coreinit] === job: resource declaration + reassignment demo ===' "$xlog"; then
+            say "xnu path ($mode): PASS (boot params v2 + $want + scheduled coreinit jobs)"
         else
-            say "xnu path ($mode): FAIL (wanted: $want and coreinit stage 1)"
+            say "xnu path ($mode): FAIL (wanted: $want and scheduled coreinit jobs)"
             rc=1
         fi
     done

@@ -47,6 +47,13 @@ fi
 # must never perturb an existing one, which is why the default branch is the
 # old branch.
 ARCH="${ARCH:-x86_64}"
+if [ "$ARCH" = "aarch64" ]; then
+    # .incbin must see exactly the bytes the judge later checks. A sibling
+    # init build can finish while this build is compiling; snapshot it once
+    # rather than embedding a moving file and judging a different image.
+    cp "$INIT_MACHO" "$BUILD/embedded-init.macho"
+    INIT_MACHO="$BUILD/embedded-init.macho"
+fi
 
 # EMBEDDED selects whether data a platform would otherwise be HANDED at boot is
 # instead compiled into the image. This is orthogonal to ARCH, deliberately:
