@@ -197,11 +197,11 @@ grade() {
        grep -qF '[kernel] factory: created handle' "$log"; then tier=4; fi
     if [ "$tier" = "4" ] && grep -qF '[coreinit] stage 1:' "$log"; then tier=5; fi
     say "highest tier reached: T$tier"
-    if [ "$tier" -ge 4 ]; then
-        say "RESULT: PASS (T$tier: DTB + init Mach-O handoff + capability dispatch)"
+    if [ "$tier" -ge 5 ]; then
+        say "RESULT: PASS (T5: DTB + init handoff + coreinit stage 1)"
         return 0
     fi
-    say "RESULT: FAIL"
+    say "RESULT: FAIL (highest partial tier T$tier; coreinit stage 1 not observed)"
     return 1
 }
 
@@ -242,10 +242,11 @@ boot' > "$WORK/grub-xnu.cfg"
            grep -qF "$want" "$xlog" && \
            grep -qF '[kernel] embedded init image:' "$xlog" && \
            grep -qF '[kernel] handing off to init' "$xlog" && \
-           grep -qF '[kernel] factory: created handle' "$xlog"; then
-            say "xnu path ($mode): PASS (boot params v2 + $want + init handoff)"
+           grep -qF '[kernel] factory: created handle' "$xlog" && \
+           grep -qF '[coreinit] stage 1:' "$xlog"; then
+            say "xnu path ($mode): PASS (boot params v2 + $want + coreinit stage 1)"
         else
-            say "xnu path ($mode): FAIL (wanted: $want)"
+            say "xnu path ($mode): FAIL (wanted: $want and coreinit stage 1)"
             rc=1
         fi
     done
