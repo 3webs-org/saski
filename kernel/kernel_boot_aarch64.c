@@ -184,7 +184,6 @@ void kernel_boot_aarch64(void)
     boot_info.pml4_phys = 0; /* ARM enters with the MMU off. */
     boot_info.init_image_addr = (uint64_t)(uintptr_t)g_embedded_init_start;
     boot_info.init_image_len = init_len;
-    boot_info.is_bsp = 1;
     boot_info.free_memory_base = 0;
     boot_info.free_memory_len = 0;
     uint64_t image_len = (uint64_t)(_end - _start);
@@ -258,7 +257,6 @@ void kernel_boot_ap_aarch64(uint64_t region_base)
     boot_info.caps = kernel_cap_bootstrap();
     boot_info.kernel_invoke = kernel_invoke;
     boot_info.kernel_load_base = KERNEL_LOAD_BASE;
-    boot_info.is_bsp = 0;
     boot_info.free_memory_base = 0;
     boot_info.free_memory_len = 0;
     boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;

@@ -496,7 +496,6 @@ void kernel_boot(void)
     boot_info.pml4_phys = (uint64_t)(uintptr_t)boot_pml4;
     boot_info.init_image_addr = (uint64_t)(uintptr_t)g_embedded_init_start;
     boot_info.init_image_len = init_len;
-    boot_info.is_bsp = 1;
     /* Not yet supplied by anything upstream of this kernel -- see
      * init_abi.h's own note. 0/0 is "none", not "unknown". */
     boot_info.free_memory_base = 0;
@@ -1137,7 +1136,6 @@ void kernel_boot_ap(uint64_t region_base)
     boot_info.kernel_load_base = KERNEL_LOAD_BASE;
     boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;
     boot_info.pml4_phys = ap_pml4_phys;
-    boot_info.is_bsp = 0;
     boot_info.free_memory_base = 0;
     boot_info.free_memory_len = 0;
     /* An AP-booted init doesn't get the original module addresses --
