@@ -119,13 +119,13 @@ PY_EOF
 # ---------------------------------------------------------------------------
 check_image() {
     STUB="$SASKI_BUILD/saski.efi"
-    [ -f "$STUB" ] || fail "no EFI stub at $STUB -- run build.sh with ARCH=aarch64 first"
+    [ -f "$STUB" ] || fail "no EFI stub at $STUB -- run cmake --build with -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake first"
     file "$STUB" | grep -q 'PE32+ executable (EFI application) Aarch64' \
         || fail "$STUB is not an Aarch64 EFI application"
     SNAPSHOT="$SASKI_BUILD/embedded-init.macho"
     SOURCE_INIT="${INIT_MACHO:-$COREINIT_ROOT/build/coreinit.macho}"
-    [ -f "$SNAPSHOT" ] || fail "no $SNAPSHOT -- rebuild with ARCH=aarch64"
-    [ -f "$SOURCE_INIT" ] || fail "no init at $SOURCE_INIT -- set INIT_MACHO to the image embedded by build.sh"
+    [ -f "$SNAPSHOT" ] || fail "no $SNAPSHOT -- rebuild with the aarch64 toolchain file"
+    [ -f "$SOURCE_INIT" ] || fail "no init at $SOURCE_INIT -- set INIT_MACHO to the image embedded by the cmake build"
     cmp -s "$SNAPSHOT" "$SOURCE_INIT" || fail "init image changed since $STUB was built -- rebuild saski before judging it"
     say "stub: $(file -b "$STUB" | sed 's/, for MS Windows//')"
 }
@@ -274,7 +274,7 @@ grade() {
 # system table and a working self-IPI are both required.
 xnu_boot() {
     [ -f "$XNU_MOD" ] || { say "xnu path: NOT RUN (no xnu.mod at $XNU_MOD)"; return 0; }
-    [ -f "$SASKI_BUILD/saski-xnu.macho" ] || fail "no $SASKI_BUILD/saski-xnu.macho -- rebuild with ARCH=aarch64"
+    [ -f "$SASKI_BUILD/saski-xnu.macho" ] || fail "no $SASKI_BUILD/saski-xnu.macho -- rebuild with the aarch64 toolchain file"
     xdisk="$WORK/disk-xnu.img"
     cp "$WORK/disk.img" "$xdisk"
     "$MTOOLS_BIN/mcopy" -o -i "$xdisk" "$XNU_MOD" ::/EFI/debian/arm64-efi/xnu.mod

@@ -1,0 +1,3 @@
+# Everything the CMake build produces -- object files and the linked
+# images. Regenerated from source, so none of it belongs in history.
+/build/

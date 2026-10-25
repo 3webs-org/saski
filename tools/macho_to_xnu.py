@@ -69,7 +69,7 @@ def convert(in_path, out_path, extra_stack_bytes=0x8000):
     # __TEXT's vmaddr + entryoff is the entry point, since __TEXT's
     # fileoff is always 0 (covers the file from the very start, headers
     # included) -- found by segname now, not by position: with a
-    # nonzero -pagezero_size (see build.sh -- needed so this
+    # nonzero -pagezero_size (see CMakeLists.txt -- needed so this
     # kernel's own load address doesn't collide with firmware-owned low
     # memory, e.g. where OVMF places the ACPI RSDP), __PAGEZERO is
     # segments[0] instead, not __TEXT.

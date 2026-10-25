@@ -8,9 +8,9 @@
 # judge: it assembles a bootable EFI disk carrying build/saski.macho, boots it
 # under QEMU with OVMF firmware, and grades the serial output by tier.
 #
-# It is PURELY ADDITIVE. It consumes build/saski.macho exactly as build.sh
-# produced it and never touches the kernel build, the kernel sources, or the
-# shared headers. If this script is wrong, the kernel is still fine.
+# It is PURELY ADDITIVE. It consumes build/saski.macho exactly as the cmake
+# build produced it and never touches the kernel build, the kernel sources,
+# or the shared headers. If this script is wrong, the kernel is still fine.
 #
 # WHY A DISK AND NOT AN ISO. The obvious shape for an EFI boot test is an El
 # Torito ISO assembled with grub-mkrescue. grub-mkrescue is unavailable here:
@@ -232,12 +232,15 @@ check_image() {
         say "  CC=$CC"
         say "  LD64=$LD64"
         say "  INIT_MACHO=$INIT"
-        ( cd "$ROOT" && CC="$CC" LD64="$LD64" INIT_MACHO="$INIT" sh ./build.sh ) \
-            || fail "BUILD=1 but build.sh failed"
+        ( cd "$ROOT" && cmake -S . -B "$SASKI_BUILD" \
+              -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-x86_64.cmake \
+              -DCMAKE_C_COMPILER="$CC" -DLD64="$LD64" -DINIT_MACHO="$INIT" \
+              && cmake --build "$SASKI_BUILD" ) \
+            || fail "BUILD=1 but the cmake build failed"
     fi
 
     KERNEL="$SASKI_BUILD/saski.macho"
-    [ -f "$KERNEL" ] || fail "no kernel image at $KERNEL -- run build.sh first, or pass BUILD=1"
+    [ -f "$KERNEL" ] || fail "no kernel image at $KERNEL -- run cmake --build (see CMakeLists.txt) first, or pass BUILD=1"
 
     newest=0
     for f in "$ROOT"/kernel/*.c "$ROOT"/kernel/*.h "$ROOT"/kernel/*.S "$ROOT"/include/*.h \
@@ -264,7 +267,7 @@ check_image() {
 
 preflight() {
     KERNEL="$SASKI_BUILD/saski.macho"
-    [ -f "$KERNEL" ] || fail "no kernel image at $KERNEL -- run build.sh first"
+    [ -f "$KERNEL" ] || fail "no kernel image at $KERNEL -- run cmake --build first"
     file "$KERNEL" | grep -q 'Mach-O 64-bit executable x86_64' \
         || fail "$KERNEL is not a Mach-O 64-bit x86_64 executable"
 
