@@ -150,20 +150,11 @@ static const object_schema_t g_factory_objects[] = {
     {.first_method = 0, .method_count = 2},
 };
 
-#if defined(__aarch64__)
+/* Mutable on every architecture, not just aarch64 -- an AP's image is a
+ * byte-for-byte copy regardless of which one, so a baked-in, link-time
+ * absolute pointer here would be exactly as wrong on x86_64 as on aarch64.
+ * kernel_cap_bootstrap rebinds this to THIS copy's own local arrays below. */
 static schema_table_t g_factory_table;
-#else
-static const schema_table_t g_factory_table = {
-    .structs = g_factory_structs,
-    .struct_count = 3,
-    .pointers = g_factory_pointers,
-    .pointer_count = 0,
-    .methods = g_factory_methods,
-    .method_count = 2,
-    .objects = g_factory_objects,
-    .object_count = 1,
-};
-#endif
 
 /* The factory object's schema handle: index 0 in the table above, a plain
  * integer so it too is compile-time constant. */
@@ -273,9 +264,13 @@ static void factory_handler(void *data, uint32_t method_id,
 
 initial_capabilities_t kernel_cap_bootstrap(void)
 {
-#if defined(__aarch64__)
-    /* An AP's image is copied byte-for-byte from the BSP. Rebind pointers
-     * to the const arrays in THIS copy before exposing the factory. */
+    /* An AP's image is copied byte-for-byte from the BSP, on every
+     * architecture -- both the lock and the schema table's pointers must
+     * be (re)established fresh in THIS copy, not inherited from whatever
+     * the BSP's own memory happened to hold at copy time. A stale
+     * g_cap_lock value in particular would be fatal, not just wrong: an
+     * AP that inherits an already-held lock has no way to ever release
+     * it, deadlocking its own first kernel_invoke forever. */
     g_cap_lock = 0;
     g_factory_table.structs = g_factory_structs;
     g_factory_table.struct_count = 3;
@@ -285,7 +280,6 @@ initial_capabilities_t kernel_cap_bootstrap(void)
     g_factory_table.method_count = 2;
     g_factory_table.objects = g_factory_objects;
     g_factory_table.object_count = 1;
-#endif
 
     g_factory_record.magic = CAP_RECORD_MAGIC;
     g_factory_record.valid = 1;
