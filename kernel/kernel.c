@@ -528,7 +528,6 @@ void kernel_boot(void)
     boot_info.hardware_mutex_id = 0;
     boot_info.lapic_calibration_count = 0;
     boot_info.cluster_scheduler_handle = 0;
-    boot_info.own_mailbox_base = BSP_MAILBOX_REGION_BASE + CORE_MAILBOX_OFFSET;
     boot_info.ram_size = xnu_boot_args_ram_size();
     kprintf("[kernel] xnu boot_args: %s (addr 0x%X), ram_size %s (%u MiB)\n",
            g_xnu_boot_args_addr ? "captured" : "not captured",
@@ -1169,7 +1168,6 @@ void kernel_boot_ap(uint64_t region_base)
      * into the discovery record by the BSP's init before the AP is started,
      * for the same reason lapic_calibration_count is. */
     boot_info.early_rsdp_phys = discovery[CORE_DISCOVERY_RSDP_OFF / 8];
-    boot_info.own_mailbox_base = region_base + CORE_MAILBOX_OFFSET;
 
     kprintf("[kernel] AP handing off to its own init copy\n");
     init_entry_t init_entry = (init_entry_t)(uintptr_t)entry;
