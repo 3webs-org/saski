@@ -90,6 +90,7 @@ elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     # the EFI stub (via its copy destination) -- derives from this value.
     set(AARCH64_RAM_BASE "0x40000000" CACHE STRING
         "Physical RAM base used by the arm64 Image-header direct boot path")
+    add_compile_definitions(AARCH64_RAM_BASE=${AARCH64_RAM_BASE})
     math(EXPR AARCH64_LOAD_BASE "${AARCH64_RAM_BASE} + 0x1000000" OUTPUT_FORMAT HEXADECIMAL)
     set(SASKI_LINK_OPTIONS
         --ld-path=${LD} -nostdlib
@@ -187,6 +188,7 @@ if(INIT_MACHO STREQUAL "")
                 -G "${CMAKE_GENERATOR}" "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
                 "-DCMAKE_TOOLCHAIN_FILE=${COREINIT_ROOT}/cmake/toolchain-${CMAKE_SYSTEM_PROCESSOR}.cmake"
                 "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}" "-DLD64=${LD64}" "-DSASKI_ROOT=${CMAKE_SOURCE_DIR}"
+                "-DAARCH64_RAM_BASE=${AARCH64_RAM_BASE}"
         COMMAND "${CMAKE_COMMAND}" --build "${COREINIT_BUILD}"
         COMMENT "Building otos-coreinit (${CMAKE_SYSTEM_PROCESSOR}) for INIT_MACHO"
         VERBATIM
