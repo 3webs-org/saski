@@ -374,6 +374,8 @@ void kernel_boot_ap_aarch64(uint64_t region_base)
     boot_info.serial_resource_handle =
         discovery[CORE_DISCOVERY_SERIAL_RESOURCE_OFF / 8];
     boot_info.early_rsdp_phys = discovery[CORE_DISCOVERY_RSDP_OFF / 8];
+    boot_info.ap_core_state_phys =
+        discovery[CORE_DISCOVERY_AP_CORE_STATE_OFF / 8];
     /* The BSP's physical DTB address is in the copied kernel's initialized
      * data (g_fdt_blob_phys). Firmware doesn't provide x0=DTB to an AP. */
     boot_info.fdt_blob_phys = g_fdt_blob_phys;
