@@ -498,12 +498,7 @@ void kernel_boot(void)
     boot_info.init_image_len = init_len;
     /* Not yet supplied by anything upstream of this kernel -- see
      * init_abi.h's own note. 0/0 is "none", not "unknown". */
-    boot_info.free_memory_base = 0;
-    boot_info.free_memory_len = 0;
-    boot_info.machine_description_phys = 0;
     boot_info.init_description_phys = 0;
-    boot_info.saski_pool_base = 0;
-    boot_info.saski_pool_len = 0;
     /* This kernel's own currently-loaded image, for SMP bring-up
      * (smp.c) to copy verbatim to an AP's region -- see
      * macho_image_size's own comment for why this is a raw memory
@@ -1139,12 +1134,7 @@ void kernel_boot_ap(uint64_t region_base)
     boot_info.kernel_load_base = KERNEL_LOAD_BASE;
     boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;
     boot_info.pml4_phys = ap_pml4_phys;
-    boot_info.free_memory_base = 0;
-    boot_info.free_memory_len = 0;
-    boot_info.machine_description_phys = 0;
     boot_info.init_description_phys = 0;
-    boot_info.saski_pool_base = 0;
-    boot_info.saski_pool_len = 0;
     /* An AP-booted init doesn't get the original module addresses --
      * only the BSP orchestrates further bring-up in this design, an
      * explicit scope limit rather than an oversight. */
@@ -1185,4 +1175,3 @@ void kernel_boot_ap(uint64_t region_base)
     halt_forever();
 }
 #endif /* __x86_64__ */
-

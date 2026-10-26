@@ -264,13 +264,32 @@ static void factory_handler(void *data, uint32_t method_id,
 
 initial_capabilities_t kernel_cap_bootstrap(void)
 {
-    /* An AP's image is copied byte-for-byte from the BSP, on every
-     * architecture -- both the lock and the schema table's pointers must
-     * be (re)established fresh in THIS copy, not inherited from whatever
-     * the BSP's own memory happened to hold at copy time. A stale
-     * g_cap_lock value in particular would be fatal, not just wrong: an
-     * AP that inherits an already-held lock has no way to ever release
-     * it, deadlocking its own first kernel_invoke forever. */
+    /* Support both AP models during the transition to shared code.
+     *
+     * In the legacy model an AP executes a byte-for-byte relocated copy.
+     * Its copied descriptor still contains BSP addresses, so pointer
+     * identity against THIS image fails and the local copy must be
+     * rebound (including clearing a possibly copied-held lock).
+     *
+     * In the shared-image model every core reaches these exact same
+     * objects. Pointer identity succeeds, and resetting the lock/factory
+     * would corrupt the BSP's live capability world. Return the existing
+     * initial grant unchanged instead. The acquire/release pairs with any
+     * concurrent invocation touching the factory record. */
+    if (g_factory_record.magic == CAP_RECORD_MAGIC &&
+        g_factory_record.valid &&
+        g_factory_record.schema_table == &g_factory_table &&
+        g_factory_table.structs == g_factory_structs &&
+        g_factory_table.methods == g_factory_methods &&
+        g_factory_table.objects == g_factory_objects) {
+        cap_irq_state_t irq_state = cap_lock();
+        initial_capabilities_t caps;
+        caps.count = 1;
+        caps.factory.handle = (uint64_t)(uintptr_t)&g_factory_record;
+        cap_unlock(irq_state);
+        return caps;
+    }
+
     g_cap_lock = 0;
     g_factory_table.structs = g_factory_structs;
     g_factory_table.struct_count = 3;

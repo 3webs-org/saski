@@ -131,26 +131,24 @@ hang:
     b hang
 
 /* The new boot-protocol entry point (see otos-coreinit's own
- * include/boot_protocol.h for the full five-register contract this
+ * include/boot_protocol.h for the full three-register contract this
  * reads). A SEPARATE entry from _start above, not a replacement --
  * GRUB's xnu loader and the arm64 boot protocol's own -kernel path
  * both still enter at _start, with its own x0-only contract,
  * completely unchanged. This symbol is reached only by a loader that
  * implements the new protocol (otos-grub, otos-boot), which branches
  * here directly instead of to _start, because the new protocol's
- * x1-x4 have nothing to do with _start's own "x1..x3 reserved zero"
+ * x1-x2 have nothing to do with _start's own "x1..x3 reserved zero"
  * contract.
  *
  * x0 = a real FDT physical address (same meaning as _start's own x0;
  * validated the same way, byte for byte -- see that validation's own
- * comment above, not re-explained here). x1 = MachineDescription
- * object's physical address (opaque; forwarded into init_boot_info
- * unread). x2 = InitDescription object's physical address (opaque;
- * forwarded unread). x3 = SaskiBootParams struct's physical address --
- * saski's own data, read directly by the C side, not forwarded blind.
- * x4 = init's already-resolved entry point, called directly: this
- * path never parses init's own Mach-O at all (kernel_boot_aarch64's
- * own macho_load call, above, has nothing to do here), because the
+ * comment above, not re-explained here). Coreinit receives this raw FDT
+ * and parses it itself. x1 = init's already-resolved entry point, called
+ * directly. x2 = InitDescription object's physical address (opaque;
+ * forwarded unread). This path never
+ * parses init's own Mach-O at all (kernel_boot_aarch64's own
+ * macho_load call, above, has nothing to do here), because the
  * loader already resolved it -- the whole point of this protocol. */
 .global boot_protocol_start
 boot_protocol_start:
@@ -158,39 +156,15 @@ boot_protocol_start:
     str  x0, [x9]
     ldr  x9, =g_fdt_blob_phys
     str  x0, [x9]
-    ldr  x9, =g_machine_description_phys
+    ldr  x9, =g_init_entry_phys
     str  x1, [x9]
     ldr  x9, =g_init_description_phys
     str  x2, [x9]
-    ldr  x9, =g_saski_boot_params_phys
-    str  x3, [x9]
-    ldr  x9, =g_init_entry_phys
-    str  x4, [x9]
 
-    /* Validate the FDT exactly like _start does above -- same bytes,
-     * same reasoning, duplicated rather than shared because _start's
-     * own copy runs before this symbol could be called from it. */
-    cbz x0, boot_protocol_no_fdt
-    ldr w10, [x0]
-    movz w11, #0xfeed
-    movk w11, #0xd00d, lsl #16
-    rev w10, w10
-    cmp w10, w11
-    b.ne boot_protocol_no_fdt
-    ldr w12, [x0, #4]
-    rev w12, w12
-    ldr  x9, =g_fdt_blob_size
-    str  x12, [x9]
-    b    boot_protocol_fdt_ok
-boot_protocol_no_fdt:
-    ldr  x9, =g_fdt_blob_phys
-    str  xzr, [x9]
-    ldr  x9, =g_fdt_blob_size
-    str  xzr, [x9]
-boot_protocol_fdt_ok:
-    /* Zero .bss and set up the stack exactly like _start does above --
-     * same image, same layout, this is just a different starting
-     * point into it. */
+    /* Zero .bss exactly like _start does above. The caller-provided SP
+     * is deliberately preserved: establishing the entry stack and
+     * active address space is part of the caller's execution context,
+     * not something saski allocates or replaces. */
     ldr  x9, =_edata
     ldr  x10, =_end
 1:  cmp  x9, x10
@@ -198,9 +172,6 @@ boot_protocol_fdt_ok:
     strb wzr, [x9], #1
     b    1b
 2:
-    ldr  x9, =_stack_top
-    mov  sp, x9
-
     bl   kernel_boot_aarch64_boot_protocol
 boot_protocol_hang:
     wfi
@@ -220,6 +191,20 @@ ap_hang:
     wfi
     b ap_hang
 
+/* Shared-image AP entry. PSCI supplies x0 = struct init_ap_handoff *.
+ * Adopt the caller-owned stack before entering C; unlike kernel_boot_ap this
+ * executes in the BSP's original image and performs no region arithmetic. */
+.global kernel_boot_ap_shared
+kernel_boot_ap_shared:
+    mov x19, x0
+    ldr x9, [x19]
+    mov sp, x9
+    mov x0, x19
+    bl kernel_boot_ap_shared_aarch64
+shared_ap_hang:
+    wfi
+    b shared_ap_hang
+
 .data
 .align 3
 /* Physical address of the DTB, as delivered in x0. Zero means "none" or
@@ -235,20 +220,14 @@ ap_hang:
 .global g_boot_x0
  g_boot_x0:
     .quad 0
-/* The new boot protocol's own x1-x4, captured raw by boot_protocol_start
+/* The new boot protocol's own x1-x2, captured raw by boot_protocol_start
  * above -- see that symbol's own comment for what each one means. Zero
  * on every boot path that still enters at _start (GRUB's xnu loader,
  * the arm64 boot protocol's own -kernel path): nothing on those paths
  * ever writes these, and kernel_boot_aarch64 (not
  * kernel_boot_aarch64_boot_protocol) never reads them either. */
-.global g_machine_description_phys
- g_machine_description_phys:
-    .quad 0
 .global g_init_description_phys
  g_init_description_phys:
-    .quad 0
-.global g_saski_boot_params_phys
- g_saski_boot_params_phys:
     .quad 0
 .global g_init_entry_phys
  g_init_entry_phys:

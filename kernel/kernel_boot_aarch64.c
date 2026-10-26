@@ -18,6 +18,7 @@ extern uint8_t g_embedded_init_end[];
 extern uint8_t _start[];
 extern uint8_t _end[];
 extern void kernel_boot_ap(uint64_t region_base); /* arch/boot_aarch64.S */
+extern void kernel_boot_ap_shared(struct init_ap_handoff *handoff);
 typedef void (*init_entry_t)(struct init_boot_info *);
 
 _Static_assert(CORE_STACK_OFFSET + CORE_STACK_SIZE == 0x380000ull,
@@ -185,12 +186,7 @@ void kernel_boot_aarch64(void)
     boot_info.pml4_phys = 0; /* ARM enters with the MMU off. */
     boot_info.init_image_addr = (uint64_t)(uintptr_t)g_embedded_init_start;
     boot_info.init_image_len = init_len;
-    boot_info.free_memory_base = 0;
-    boot_info.free_memory_len = 0;
-    boot_info.machine_description_phys = 0;
     boot_info.init_description_phys = 0;
-    boot_info.saski_pool_base = 0;
-    boot_info.saski_pool_len = 0;
     uint64_t image_len = (uint64_t)(_end - _start);
     uint64_t init_footprint = macho_image_size(g_embedded_init_start);
     if (image_len <= CORE_KERNEL_MAX_SIZE && init_footprint != 0 &&
@@ -237,11 +233,9 @@ void kernel_boot_aarch64(void)
 }
 
 /* Provided by arch/boot_aarch64.S's boot_protocol_start: the new
- * five-register handoff (see ../include/boot_protocol.h). Captured raw
+ * three-register handoff (see ../include/boot_protocol.h). Captured raw
  * before any C runs, same reasoning as g_fdt_blob_phys/g_boot_x0 above. */
-extern unsigned long long g_machine_description_phys;
 extern unsigned long long g_init_description_phys;
-extern unsigned long long g_saski_boot_params_phys;
 extern unsigned long long g_init_entry_phys;
 
 /* Entered by arch/boot_aarch64.S's boot_protocol_start -- a loader
@@ -257,52 +251,21 @@ extern unsigned long long g_init_entry_phys;
  * simplification the new protocol buys saski, beyond just a cleaner
  * machine-description handoff.
  *
- * Scoped to the BSP path only, for now: kernel_boot_ap/
- * kernel_boot_ap_aarch64 below still bring an AP up via the OLD
- * per-core region scheme (CORE_STACK_OFFSET/CORE_PGTABLE_OFFSET).
- * Bringing an AP up via this new protocol's own SaskiBootParams pool
- * instead is real, separate follow-on work, not done here. */
+ * On this path kernel_boot_ap_shared is published to coreinit. PSCI APs then
+ * enter this same saski image and the same already-loaded init image through
+ * a caller-owned stack/handoff; the region-copy entry below remains for the
+ * legacy boot paths. */
 void kernel_boot_aarch64_boot_protocol(void)
 {
     serial_init();
     kprintf("[kernel] aarch64 boot (new boot protocol)\n");
 
-    if (g_fdt_blob_phys == 0) {
-        kprintf("[kernel] no DTB: the loader supplied none, or it failed "
-                "validation\n");
-    } else if (fdt_valid((const void *)(uintptr_t)g_fdt_blob_phys,
-                        g_fdt_blob_size)) {
-        kprintf("[kernel] DTB at 0x%X, %u bytes, valid\n",
-                (unsigned)g_fdt_blob_phys, (unsigned)g_fdt_blob_size);
-    } else {
-        kprintf("[kernel] DTB at 0x%X failed full validation\n",
-                (unsigned)g_fdt_blob_phys);
-    }
+    kprintf("[kernel] forwarding raw DTB 0x%X to init unread\n",
+            (unsigned)g_fdt_blob_phys);
 
     if (g_init_entry_phys == 0) {
         kprintf("[kernel] PANIC: loader gave no init entry point\n");
         halt_forever();
-    }
-
-    /* SaskiBootParams is saski's own data -- read it directly, unlike
-     * MachineDescription/InitDescription below, which are forwarded
-     * into init_boot_info unread (see that struct's own comment in
-     * boot_protocol.h for why). A bad magic is treated as "no pool
-     * supplied" rather than trusted -- the same untrusted-until-
-     * validated posture arch/boot_aarch64.S's own FDT check already
-     * establishes for this loader's other inputs. */
-    uint64_t saski_pool_base = 0, saski_pool_len = 0;
-    if (g_saski_boot_params_phys != 0) {
-        const struct saski_boot_params *p =
-            (const struct saski_boot_params *)(uintptr_t)g_saski_boot_params_phys;
-        if (p->magic == SASKI_BOOT_PARAMS_MAGIC) {
-            saski_pool_base = p->saski_pool_base;
-            saski_pool_len = p->saski_pool_len;
-        } else {
-            kprintf("[kernel] SaskiBootParams at 0x%X has a bad magic -- "
-                    "treating as absent\n",
-                    (unsigned)g_saski_boot_params_phys);
-        }
     }
 
     static struct init_boot_info boot_info;
@@ -310,30 +273,22 @@ void kernel_boot_aarch64_boot_protocol(void)
     boot_info.kernel_invoke = kernel_invoke;
     boot_info.kernel_load_base = (uint64_t)(uintptr_t)_start;
     boot_info.pml4_phys = 0; /* ARM enters with the MMU off. */
-    /* Nothing to self-describe for AP bring-up on this path yet (see
-     * this function's own top comment) -- kernel_boot_aarch64's own
-     * image_len/init_footprint bounds check exists only to feed
-     * kernel_boot_ap's region-relative copy, which this path doesn't
-     * use. */
+    /* No image spans are needed: this path publishes a direct shared AP
+     * entry and resolved init entry instead of feeding kernel_boot_ap's
+     * region-relative copy. */
     boot_info.init_image_addr = 0;
     boot_info.init_image_len = 0;
-    boot_info.kernel_boot_ap_addr = 0;
+    boot_info.kernel_boot_ap_addr =
+        (uint64_t)(uintptr_t)kernel_boot_ap_shared;
     boot_info.kernel_image_addr = 0;
     boot_info.kernel_image_len = 0;
-    boot_info.free_memory_base = 0;
-    boot_info.free_memory_len = 0;
-    boot_info.machine_description_phys = g_machine_description_phys;
     boot_info.init_description_phys = g_init_description_phys;
-    boot_info.saski_pool_base = saski_pool_base;
-    boot_info.saski_pool_len = saski_pool_len;
-    /* This path's machine description is MachineDescription, not ACPI
-     * handed to saski directly -- early_rsdp_phys exists as its OWN
-     * field inside that object instead (see boot_protocol.h); only
-     * coreinit decodes it. */
+    boot_info.init_entry_addr = g_init_entry_phys;
+    boot_info.ap_core_state_phys = 0;
+    /* ACPI is not used on this aarch64 path. */
     boot_info.early_rsdp_phys = 0;
     boot_info.fdt_blob_phys = g_fdt_blob_phys;
-    boot_info.ram_size = 0; /* unknown here -- MachineDescription carries
-                             * it; only coreinit decodes that object. */
+    boot_info.ram_size = 0; /* coreinit discovers it from the raw FDT. */
     boot_info.bsp_kernel_invoke_addr = 0; /* this is the BSP's own boot_info */
     boot_info.mutex_manager_handle = 0;
     boot_info.memory_manager_handle = 0;
@@ -342,17 +297,34 @@ void kernel_boot_aarch64_boot_protocol(void)
     boot_info.cluster_scheduler_handle = 0;
     boot_info.serial_resource_handle = 0;
 
-    kprintf("[kernel] init boot info: fdt 0x%X, machine_description 0x%X, "
-            "init_description 0x%X, saski_pool 0x%X/0x%X\n",
+    kprintf("[kernel] init boot info: fdt 0x%X, init_description 0x%X\n",
             (unsigned)boot_info.fdt_blob_phys,
-            (unsigned)boot_info.machine_description_phys,
-            (unsigned)boot_info.init_description_phys,
-            (unsigned)boot_info.saski_pool_base,
-            (unsigned)boot_info.saski_pool_len);
+            (unsigned)boot_info.init_description_phys);
     kprintf("[kernel] handing off to init at 0x%X -- kernel does not run "
             "again after this\n", (unsigned)g_init_entry_phys);
     ((init_entry_t)(uintptr_t)g_init_entry_phys)(&boot_info);
     kprintf("[kernel] PANIC: init returned\n");
+    halt_forever();
+}
+
+/* Shared kernel and init images: the BSP constructed this core's boot_info,
+ * stack, and core_state before CPU_ON. Only the capability bootstrap belongs
+ * to saski; in a shared image it returns the already-live factory without
+ * resetting its table. */
+void kernel_boot_ap_shared_aarch64(struct init_ap_handoff *handoff)
+{
+    serial_init();
+    if (!handoff || !handoff->init_entry ||
+        !handoff->boot_info.ap_core_state_phys) {
+        kprintf("[kernel] shared AP PANIC: invalid handoff\n");
+        halt_forever();
+    }
+    handoff->boot_info.caps = kernel_cap_bootstrap();
+    handoff->boot_info.kernel_invoke = kernel_invoke;
+    kprintf("[kernel] AP entering shared init at 0x%X\n",
+            (unsigned)handoff->init_entry);
+    ((init_entry_t)(uintptr_t)handoff->init_entry)(&handoff->boot_info);
+    kprintf("[kernel] shared AP PANIC: init returned\n");
     halt_forever();
 }
 
@@ -382,12 +354,7 @@ void kernel_boot_ap_aarch64(uint64_t region_base)
     boot_info.caps = kernel_cap_bootstrap();
     boot_info.kernel_invoke = kernel_invoke;
     boot_info.kernel_load_base = KERNEL_LOAD_BASE;
-    boot_info.free_memory_base = 0;
-    boot_info.free_memory_len = 0;
-    boot_info.machine_description_phys = 0;
     boot_info.init_description_phys = 0;
-    boot_info.saski_pool_base = 0;
-    boot_info.saski_pool_len = 0;
     boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;
     boot_info.pml4_phys = 0;
     /* AP init does not orchestrate another layer of AP bring-up. */
