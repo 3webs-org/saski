@@ -88,7 +88,9 @@ elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     # 0x40200000). Every aarch64 boot path -- QEMU -kernel (via the Image
     # header's text_offset), GRUB xnu_kernel64 (via the Mach-O vmaddr),
     # the EFI stub (via its copy destination) -- derives from this value.
-    math(EXPR AARCH64_LOAD_BASE "0x40000000 + 0x1000000" OUTPUT_FORMAT HEXADECIMAL)
+    set(AARCH64_RAM_BASE "0x40000000" CACHE STRING
+        "Physical RAM base used by the arm64 Image-header direct boot path")
+    math(EXPR AARCH64_LOAD_BASE "${AARCH64_RAM_BASE} + 0x1000000" OUTPUT_FORMAT HEXADECIMAL)
     set(SASKI_LINK_OPTIONS
         --ld-path=${LD} -nostdlib
         -Wl,-e,_start -Wl,-Ttext,${AARCH64_LOAD_BASE}
