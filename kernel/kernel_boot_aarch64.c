@@ -186,6 +186,10 @@ void kernel_boot_aarch64(void)
     boot_info.init_image_len = init_len;
     boot_info.free_memory_base = 0;
     boot_info.free_memory_len = 0;
+    boot_info.machine_description_phys = 0;
+    boot_info.init_description_phys = 0;
+    boot_info.saski_pool_base = 0;
+    boot_info.saski_pool_len = 0;
     uint64_t image_len = (uint64_t)(_end - _start);
     uint64_t init_footprint = macho_image_size(g_embedded_init_start);
     if (image_len <= CORE_KERNEL_MAX_SIZE && init_footprint != 0 &&
@@ -259,6 +263,10 @@ void kernel_boot_ap_aarch64(uint64_t region_base)
     boot_info.kernel_load_base = KERNEL_LOAD_BASE;
     boot_info.free_memory_base = 0;
     boot_info.free_memory_len = 0;
+    boot_info.machine_description_phys = 0;
+    boot_info.init_description_phys = 0;
+    boot_info.saski_pool_base = 0;
+    boot_info.saski_pool_len = 0;
     boot_info.kernel_boot_ap_addr = (uint64_t)(uintptr_t)kernel_boot_ap;
     boot_info.pml4_phys = 0;
     /* AP init does not orchestrate another layer of AP bring-up. */
