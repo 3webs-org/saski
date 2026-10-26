@@ -3,6 +3,7 @@
 #include "macho.h"
 #include "../include/init_abi.h"
 #include "../include/smp_layout.h"
+#include "../include/boot_protocol.h"
 #include "serial.h"
 #include "fdt.h"
 #include "xnu_boot_args.h"
@@ -231,6 +232,126 @@ void kernel_boot_aarch64(void)
             (unsigned)(boot_info.ram_size / (1024 * 1024)));
     kprintf("[kernel] handing off to init -- kernel does not run again after this\n");
     ((init_entry_t)(uintptr_t)entry)(&boot_info);
+    kprintf("[kernel] PANIC: init returned\n");
+    halt_forever();
+}
+
+/* Provided by arch/boot_aarch64.S's boot_protocol_start: the new
+ * five-register handoff (see ../include/boot_protocol.h). Captured raw
+ * before any C runs, same reasoning as g_fdt_blob_phys/g_boot_x0 above. */
+extern unsigned long long g_machine_description_phys;
+extern unsigned long long g_init_description_phys;
+extern unsigned long long g_saski_boot_params_phys;
+extern unsigned long long g_init_entry_phys;
+
+/* Entered by arch/boot_aarch64.S's boot_protocol_start -- a loader
+ * implementing the new boot protocol (otos-grub, otos-boot), never
+ * GRUB's xnu loader or the arm64 boot protocol's own -kernel path
+ * (those still enter at _start/kernel_boot_aarch64 above, completely
+ * unchanged).
+ *
+ * Deliberately does NOT call macho_load at all: g_init_entry_phys is
+ * init's ALREADY-RESOLVED entry point -- the loader parsed init's own
+ * Mach-O itself (the whole point of this protocol), so there is
+ * nothing left for this kernel to resolve. This is the one real
+ * simplification the new protocol buys saski, beyond just a cleaner
+ * machine-description handoff.
+ *
+ * Scoped to the BSP path only, for now: kernel_boot_ap/
+ * kernel_boot_ap_aarch64 below still bring an AP up via the OLD
+ * per-core region scheme (CORE_STACK_OFFSET/CORE_PGTABLE_OFFSET).
+ * Bringing an AP up via this new protocol's own SaskiBootParams pool
+ * instead is real, separate follow-on work, not done here. */
+void kernel_boot_aarch64_boot_protocol(void)
+{
+    serial_init();
+    kprintf("[kernel] aarch64 boot (new boot protocol)\n");
+
+    if (g_fdt_blob_phys == 0) {
+        kprintf("[kernel] no DTB: the loader supplied none, or it failed "
+                "validation\n");
+    } else if (fdt_valid((const void *)(uintptr_t)g_fdt_blob_phys,
+                        g_fdt_blob_size)) {
+        kprintf("[kernel] DTB at 0x%X, %u bytes, valid\n",
+                (unsigned)g_fdt_blob_phys, (unsigned)g_fdt_blob_size);
+    } else {
+        kprintf("[kernel] DTB at 0x%X failed full validation\n",
+                (unsigned)g_fdt_blob_phys);
+    }
+
+    if (g_init_entry_phys == 0) {
+        kprintf("[kernel] PANIC: loader gave no init entry point\n");
+        halt_forever();
+    }
+
+    /* SaskiBootParams is saski's own data -- read it directly, unlike
+     * MachineDescription/InitDescription below, which are forwarded
+     * into init_boot_info unread (see that struct's own comment in
+     * boot_protocol.h for why). A bad magic is treated as "no pool
+     * supplied" rather than trusted -- the same untrusted-until-
+     * validated posture arch/boot_aarch64.S's own FDT check already
+     * establishes for this loader's other inputs. */
+    uint64_t saski_pool_base = 0, saski_pool_len = 0;
+    if (g_saski_boot_params_phys != 0) {
+        const struct saski_boot_params *p =
+            (const struct saski_boot_params *)(uintptr_t)g_saski_boot_params_phys;
+        if (p->magic == SASKI_BOOT_PARAMS_MAGIC) {
+            saski_pool_base = p->saski_pool_base;
+            saski_pool_len = p->saski_pool_len;
+        } else {
+            kprintf("[kernel] SaskiBootParams at 0x%X has a bad magic -- "
+                    "treating as absent\n",
+                    (unsigned)g_saski_boot_params_phys);
+        }
+    }
+
+    static struct init_boot_info boot_info;
+    boot_info.caps = kernel_cap_bootstrap();
+    boot_info.kernel_invoke = kernel_invoke;
+    boot_info.kernel_load_base = (uint64_t)(uintptr_t)_start;
+    boot_info.pml4_phys = 0; /* ARM enters with the MMU off. */
+    /* Nothing to self-describe for AP bring-up on this path yet (see
+     * this function's own top comment) -- kernel_boot_aarch64's own
+     * image_len/init_footprint bounds check exists only to feed
+     * kernel_boot_ap's region-relative copy, which this path doesn't
+     * use. */
+    boot_info.init_image_addr = 0;
+    boot_info.init_image_len = 0;
+    boot_info.kernel_boot_ap_addr = 0;
+    boot_info.kernel_image_addr = 0;
+    boot_info.kernel_image_len = 0;
+    boot_info.free_memory_base = 0;
+    boot_info.free_memory_len = 0;
+    boot_info.machine_description_phys = g_machine_description_phys;
+    boot_info.init_description_phys = g_init_description_phys;
+    boot_info.saski_pool_base = saski_pool_base;
+    boot_info.saski_pool_len = saski_pool_len;
+    /* This path's machine description is MachineDescription, not ACPI
+     * handed to saski directly -- early_rsdp_phys exists as its OWN
+     * field inside that object instead (see boot_protocol.h); only
+     * coreinit decodes it. */
+    boot_info.early_rsdp_phys = 0;
+    boot_info.fdt_blob_phys = g_fdt_blob_phys;
+    boot_info.ram_size = 0; /* unknown here -- MachineDescription carries
+                             * it; only coreinit decodes that object. */
+    boot_info.bsp_kernel_invoke_addr = 0; /* this is the BSP's own boot_info */
+    boot_info.mutex_manager_handle = 0;
+    boot_info.memory_manager_handle = 0;
+    boot_info.hardware_mutex_id = 0;
+    boot_info.lapic_calibration_count = 0;
+    boot_info.cluster_scheduler_handle = 0;
+    boot_info.serial_resource_handle = 0;
+
+    kprintf("[kernel] init boot info: fdt 0x%X, machine_description 0x%X, "
+            "init_description 0x%X, saski_pool 0x%X/0x%X\n",
+            (unsigned)boot_info.fdt_blob_phys,
+            (unsigned)boot_info.machine_description_phys,
+            (unsigned)boot_info.init_description_phys,
+            (unsigned)boot_info.saski_pool_base,
+            (unsigned)boot_info.saski_pool_len);
+    kprintf("[kernel] handing off to init at 0x%X -- kernel does not run "
+            "again after this\n", (unsigned)g_init_entry_phys);
+    ((init_entry_t)(uintptr_t)g_init_entry_phys)(&boot_info);
     kprintf("[kernel] PANIC: init returned\n");
     halt_forever();
 }
